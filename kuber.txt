@@ -1,0 +1,5849 @@
+How to install kubeadm
+------------------------------------------------------
+ubuntu 16.04 LTS
+requirment:
+2G RAM
+2 Core CPu
+2 network
+
+--------------------------------------------------------
+DNS_IPS=("178.22.122.100" "185.51.200.2") 
+sudo cp /etc/resolv.conf /etc/resolv.conf.old 
+for dns_ip in "${DNS_IPS[@]}"; do  
+   echo "nameserver $dns_ip" | sudo tee -a /etc/resolv.conf
+done
+
+ 
+sudo sed -e '/^.*ubuntu-focal.*/d' -i /etc/hosts 
+PRIVATE_INTERFACE_NAME=enp0s8
+
+ip_address="$(ip -4 addr show ${PRIVATE_INTERFACE_NAME} | grep "inet" | head -1 | awk '{print $2}' | cut -d/ -f1)" 
+ sudo sed -e "s/^.*${HOSTNAME}.*/${ip_address} ${HOSTNAME} ${HOSTNAME}.local/" -i /etc/hosts 
+
+sudo apt-get update 
+sudo apt-get dist-upgrade --yes 
+sudo apt-get upgrade --yes 
+
+sudo hostnamectl set-hostname master-node
+sudo apt-get install --yes apt-transport-https ca-certificates curl gnupg-agent software-properties-common bash-completion ipset
+
+sudo sed -i '/swap/d' /etc/fstab 
+cat <<EOF | sudo tee /etc/sysctl.d/swap.conf 
+vm.swappiness=0
+EOF 
+sudo swapoff –a
+sudo lsmod | grep br_netfilter 
+sudo modprobe br_netfilter 
+
+cat <<EOF | sudo tee -a /etc/sysctl.d/k8s.conf 
+net.bridge.bridge-nf-call-ip6tables = 1 
+net.bridge.bridge-nf-call-iptables = 1 
+EOF 
+sudo sysctl --system 
+
+
+-----install docker----
+# (Install Docker CE)
+## Set up the repository:
+### Install packages to allow apt to use a repository over HTTPS
+apt-get update && apt-get install -y \
+  apt-transport-https ca-certificates curl software-properties-common gnupg2
+
+# Add Docker’s official GPG key:
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo apt-key --keyring /etc/apt/trusted.gpg.d/docker.gpg add -
+
+
+# Add the Docker apt repository:
+add-apt-repository \
+  "deb [arch=amd64] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) \
+  stable"
+
+# Install Docker CE
+apt-get update && apt-get install -y \
+  containerd.io=1.2.13-2 \
+  docker-ce=5:19.03.11~3-0~ubuntu-$(lsb_release -cs) \
+  docker-ce-cli=5:19.03.11~3-0~ubuntu-$(lsb_release -cs)
+
+# Set up the Docker daemon
+cat > /etc/docker/daemon.json <<EOF
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m"
+  },
+  "storage-driver": "overlay2"
+}
+
+EOF
+
+mkdir -p /etc/systemd/system/docker.service.d
+
+# Restart Docker
+systemctl daemon-reload
+systemctl restart docker
+sudo systemctl enable docker
+
+---------------------kubeadm
+
+sudo apt-get update && sudo apt-get install -y apt-transport-https curl
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
+deb https://apt.kubernetes.io/ kubernetes-xenial main
+EOF
+sudo apt-get update
+KUBE_VERSION=1.18.12 
+sudo apt-get install --yes kubelet="$KUBE_VERSION-00" kubeadm="$KUBE_VERSION-00" kubectl="$KUBE_VERSION-00" 
+sudo apt-mark hold kubelet kubeadm kubectl docker containerd.io 
+
+systemctl daemon-reload
+systemctl restart kubelet
+
+K8S_VERSION=1.18.12 
+MASTER_NODE_IP=192.168.100.11
+sudo kubeadm init --kubernetes-version $K8S_VERSION --apiserver-advertise-address $MASTER_NODE_IP --pod-network-cidr 10.244.0.0/16 
+
+mkdir -p $HOME/.kube  
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config  
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+-------apply calico-----------------------
+
+ 
+curl https://docs.projectcalico.org/manifests/calico.yaml -O
+ kubectl apply -f ./calico.yaml
+
+-----apply flannel
+
+sudo kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+
+
+
+--------------------join worker ---------------------------------------
+kubeadm token list   ---> (A)
+openssl x509 --pubkey -in /etc/kubernetes/pki/ca.crt | openssl rsa -pubin -outform der 2 > /dev/null | \
+openssl dgst -sha256 -hex | sed 's/^.* //'  --> (B)
+
+sudo kubeadm join <ip-master:6443> --token (A) --discovery-token-ca-cert-hash (B)
+
+-----(OR)-----
+kubeadm token create --print-join-command   ---> master
+sudo kubeadm join <ip-master:6443> --token (A) --discovery-token-ca-cert-hash (B)  ---> worker
+
+---------------add role to worker--------------
+kubectl label node worker1 kubernetes.io/role=node
+kubectl get nodes
+
+kubectl --kubeconfig /etc/kubernetes/admin.conf get nodes
+
+
+
+-----------------------------------------------------------------------
+------------------connect to etcd pod (port number 2379)--------------
+
+kubectl exec etcd-master -n kube-system -- etcdctl get / --prefix --keys-only  --> exec to connect to pod
+
+kubectl exec etcd-master -n kube-system -- etcdctl get /registry/clusterrolebindings/cluster-admin --cert="/etc/kubernetes/pki/etcd/server.crt" --cacert="/etc/kubernetes/pki/etcd/ca.crt" --key="/etc/kubernetes/pki/etcd/server.key" 
+
+kubectl -n kube-system describe pod etcd-master
+
+kubectl -n kube-system get daemonset  ---> see calico and kube-proxy daemoset on nodes
+
+
+kubectl run nginx --image nginx    ---> launch pod
+---------------------------------create pod with manifest----
+https://v1-18.docs.kubernetes.io  ---> documention manifest k8s
+
+vim ./pod-definition.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  containers:
+    - name: nginx-container
+      image: nginx:1.17
+
+kubectl apply -f ./pod-definition.yml
+
+kubectl describe pod myapp-pod
+
+kubectl delete pod myapp-pod
+
+kubectl delete -f pod-manifest.yml
+
+kubectl run nginx --image dockerhub.ir/nginx:stable
+
+kubectl get pods pod-nginx -o wide > ./po.yml ---> result yaml
+
+kubectl apply -f ./po.yml
+
+
+-------
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  containers:
+    - name: nginx-container
+      image: nginx:1.17
+      ports:
+        - name: http
+          containerPort: 8080
+          hostPort: 8080
+
+
+kubectl explain pod    ---> man pod
+kubectl explain pod.spec.container.port
+
+-----Replication Controller---
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: myapp-rc
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-pod
+      labels:
+        app: myapp
+        type: front-end
+    spec:
+      containers:
+      - name: nginx-controller
+        image: nginx
+  replicas: 3
+
+kubectl create -f rc-definition.yml
+
+
+-------ReplicaSet---
+
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: myapp-rc
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-pod
+      labels:
+        app: myapp
+        type: front-end
+    spec:
+      containers:
+      - name: nginx-controller
+        image: nginx
+  replicas: 3
+  selector:
+    matchLabels:
+      type: front-end
+
+kubectl applt -f rs.yml
+
+kubectl get rs
+kubectl describe rs myapp-rc
+
+---------------------------replica set-------
+
+vim ./replication-definittion.yml
+
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: myapp-areplication
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-pod
+      labels:
+        app: myapp
+        type: front-end
+    spec:
+      containers:
+      - name: nginx-controller
+        image: nginx
+  replicas: 3
+  selector:
+    matchLabels:
+      type: front-end
+
+kubectl apply -f ./replication-definition.yml
+
+kubectl replace -f replication-definition.yml   ---> manualy change replicas
+kubectl scale --replicas=6 -f replication-definition.yml
+kubectl scale --replicas=6 replicaset myapp-replicaset   
+
+kubectl get pods
+
+--------------------Deployment---------------------------
+
+vim ./deployment.yml
+
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-aplication
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-pod
+      labels:
+        app: myapp
+        type: front-end
+    spec:
+      containers:
+      - name: nginx-controller
+        image: nginx
+  replicas: 3
+  selector:
+    matchLabels:
+      type: front-end
+
+kubectl applty -f deployment.yml
+
+kubectl get deployments
+kubectl get rs
+
+kubectl get pods
+kubectl describe deployment myapp-replication
+
+watch -n 1 kubectl get pods
+----------------------------------Namespace-----------------
+
+
+----compute-quota
+
+vim ./compute-quota.yaml
+
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: dev-quota
+  namespace: dev
+spec:
+  hard:
+    pods: "10"
+    count/deployments.apps: "2"  ---> count deployment
+    cpu: "100m"
+    memory: "100M"
+
+kubectl apply -f ./compute-quota.yaml
+kubectl describe ns dev
+
+------------
+---create namespace
+
+kubectl create namespace dev
+
+OR
+
+vim ns-def.yaml
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  
+kubectl apply -f ./ns-def.yaml
+
+kubectl get namespace
+
+kubectl get pods --namespace dev
+
+kubectl describe ns dev
+kubectl get ns
+
+------create deployment on namespace dev
+
+kubectl apply -f deploy.yaml -n dev
+
+OR
+
+vim ./deploy.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: dev
+spec:
+  replaces: 6
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.18
+          resources:             ----> per container
+	    requests:
+	      cpu: "1m"
+	      memory: "10M"
+	    limits:
+	      cpu: "10m"
+	      memory: "50M"
+
+
+kubectl apply -f ./deploy.yaml
+kubectl -n dev get pods
+kubectl -n dev get deploy
+kubectl describe ns dev -n dev
+kubectl get rs -n dev
+
+kubectl -n dev get events   ----> any events on namespace dev
+kubectl delete -f deploy.yaml
+
+--------------namespace default on context of config file
+vim ./.kube/admin.conf
+kubectl config set-context (context name)cka --namespace=dev
+
+--------------coreDNS-----
+db-service.dev.svc.cluster.local
+service Name.Namespace.Service.domain
+
+---------------------------Services-----
+kubectl get pods -o wide
+TargetPort (POD Port) , Port (Service Port) ,NodePort (Host Port)
+port range for Node Port: 30000-32767
+1)NodePort
+2)ClusterIP
+3)LoadBalancer
+
+-------------------node port-----------------
+-----create pod------
+vim pod-definition.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  containers:
+  - name: nginx-container
+    image: nginx
+kubectl apply -f ./pod-definition.yaml
+
+-----node port service----
+vim ./service-definition.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-service
+spec:
+  type: NodePort
+  ports:
+    - targetPort: 80
+      port: 80          ---> optional
+      nodePort: 30008   ---> optional
+  selector:
+    app: myapp
+    type: front-end
+
+kubectl apply -f ./service-definition.yaml
+
+kubectl get pods --show-labels   ---> see labels on pods
+kubectl get svc
+kubectl describe svc myapp-service
+kubectl get pods -o wide
+-----------------------------------------------------
+-------------------cluster ip----
+vim ./service-def.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-internal
+spec:
+  type: ClusterIP   ----> default is clusterip
+  ports:
+    - targetPort: 80
+      port: 80
+  selector:
+    app: myapp
+    type: back-end
+
+kubectl apply -f ./service-def.yaml
+kubectl get svc
+kubectl describe svc backend-internal
+
+-------------------
+kubectl -n default run debbuger --image alpine:3.11.3 --command -- sleep infinity
+
+kubectl -n default exec debbuger -- apk add curl   ---> install curl on container
+kubectl -n default exec debugger -- curl http://nginx-internal.dev.svc.cluster.local:8080  ---> allow to pod in another ns to another pod with clusterip
+
+------------------LoadBalancer Service---------
+vim ./service-def.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-external
+spec:
+  type: LoadBalancer
+  ports:
+    - targetport: 80
+      port: 80
+      nodePort: 30008
+  selector:
+    app: myapp
+
+kubectl apply -f ./service-def.yaml
+
+------------------------------------
+kubevip for load balancer for enviroment labratoar
+
+-----------------------------------
+kubectl port-forward service/nginx 8090:80   ---> static forward host port 8090 to service clusterip name nginx
+kubectl port-forward deploy/nginx 8090:80
+
+======================================================================
+
+-----------------------scheduling------------------------
+
+--------pod deploy which pod -----
+vim ./pod-definition.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:
+    name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    ports:
+      - containerPort: 8080
+  nodeName: node02
+
+kubectl apply -f ./pod-definition.yaml
+------------------static scheduling----
+vim ./pod-bind-difinition.yml
+apiVersion: v1
+kind: Binding
+metadata:
+  name: nginx
+target:
+  apiVersion: v1
+  kind: Node
+  name: node02
+
+kubectl apply -f ./pod-bind-difinition.yml
+
+vim ./pod-definition.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+  labels:
+    name: nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx
+    ports:
+      - containerPort: 8080
+
+kubectl apply -f ./pod-difinition.yml
+--------------------------------
+---------------label and selector--------------
+
+vim pod-defintion.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-webapp
+  labels:
+    app: App1
+    function: Front-end
+spec:
+  containers:
+  - name: simple-webapp
+    image: simple-webapp
+    ports:
+      - contaonerPort: 8080
+kubectl apply -f ./pod-definition.yml
+
+kubectl get pods --selector app=App1
+---------------
+vim ./replicaset-def.yml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: simple-webapp
+  labels:
+    app: App1
+    function: Front-end
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: App1
+  template:
+    metadata:
+      labels:
+	app: App1                  ----> this labels use to service selector because service work with pods
+ 	function: Front-end
+    spec:
+      containers:
+      - name: simple-webapp
+        image: simple-webapp
+----
+vim ./service-difinition.yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+spec:
+  selector:
+    app: App1
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 9376
+
+-----------------------------------Annotations--------------------------
+vim ./replicaset-def.yml
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: simple-webapp
+  labels:
+    app: App1
+    function: Front-end
+  annotations:                ----> auto discovery and read metric for promoteos
+    buildversion: 1.34
+    prometheus.io/scrape: "true"    ---> prome
+    promethous.io/port: "80"        ---> prome
+    promethous.io/path: "/metrics"  ---> prome
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: App1
+  template:
+    metadata:
+      labels:
+        app: App1
+        function: Front-end
+    spec:
+      containers:
+      - name: simple-webapp
+        image: simple-webapp
+------------
+----------------------------------taints and tolerations-----------------
+(taint for nodes and tolerations for pods)
+kubectl taint nodes (node-name) key[=value]:taint-effect   ---> taint node
+kubectl taint nodes node1 app=blue:NoSchedule   ----> NoSchedule OR PreferNoSchedule OR NoExcute
+
+vim ./pod-def.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+spec:
+  containers:
+  - name: nginx-container
+    image: nginx
+  tolerations:
+    - key: "app"           ---> key for master node is (node-role.kubernetes.io/master)
+      operator: "Equal"    ---> operator for master node is (Exists)
+      value: "blue"         ----> master node is not value
+      effect: "NoSchedule"   ---> optional if not write any effect (for master node is (NoSchedule))
+kubectl apply -f ./pod-def.yml
+
+kubectl describe node kubemaster | grep Taints
+
+kubectl get pods --selector app=myapp-pod
+
+=======================================================================
+--------------------Node Selector-----------------------
+
+vim ./pod-definition.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+spec:
+  containers:
+  - name: data-processor
+    image: data-processor
+  nodeSelector:
+    size: Large
+
+kubectl label nodes worker1 size=Large
+
+kubectl apply -f ./pod-definition.yml
+
+kubectl get node
+kubectl get node --show-labels
+
+vim ./deploy-def.yml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+	app: nginx
+    spec:
+      containers:
+        - name: nginx
+	  image: nginx:1.18
+      nodeSelector:
+	size: small
+kubectl apply -f ./deploy-def.yml
+kubectl label nodes worker-2 size=small   ---> add label to node
+
+kubectl label nodes worker-2 size-     ---> delete label on node
+
+kubectl get pods
+
+----------------------------Node Affinity--------
+node affinity types:
+1) Available
+requiredDuringSchedulingIgnoredDuringExecution
+preferredDuringSchedulingIgnoredDuringExecution
+
+2)Planned
+requiredDuringSchedulingRequiredDuringExecution
+
+kubectl explain pod.spec.affinity
+
+vim ./deploy-def.yml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+	app: nginx
+    spec:
+      containers:
+        - name: nginx
+	  image: nginx:1.18
+      affinity:
+	nodeAffinity:
+	  requiredDuringSchedulingIgnoredDuringExecution: 
+	    - matchExperessions:
+		- key: "size"
+		- operator: "In"
+		- values: 
+ 		    - "Large"       ---> size = Large OR size = small
+		    - "small"
+
+kubectl apply -f ./deploy-def.yml
+kubectl label node worker2 size=large
+kubectl label node worker1 size=small
+
+------------------------------------------------------------
+-------------------NODE AFFINITY vs TAINTS AND TOLERATIONS----
+kubectl describe kubemaster-1 | grep -i taint
+
+kubectl label nodes kubemaster-1 node-role.kubernetes.io/master-   ---> delete taint for master node
+kubectl taint node kubeworker-1 color=red:NoSchedule
+kubectl taint node kubeworker-2 color=blue:NoSchedule
+
+vim ./dep-def.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-red
+  namespace: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+	app: nginx
+    spec:
+      tolerations:
+	- key: "color"
+	  operator: "Equal"
+	  value: "red"
+	  effect: "NoSchedule"
+      containers:
+        - name: nginx
+	  image: nginx:1.18
+     
+	
+kubectl apply -f ./dep-def.yml
+
+vim ./depb-def.yml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-blue
+  namespace: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+	app: nginx
+    spec:
+      tolerations:
+	- key: "color"
+	  operator: "Equal"
+	  value: "blue"
+	  effect: "NoSchedule"
+      containers:
+        - name: nginx
+	  image: nginx:1.18
+kubectl apply -f ./depb-def.yml
+
+---------------------------------
+vim ./dep-def.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-red
+  namespace: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+	app: nginx
+    spec:
+     affinity:
+	nodeAffinity:
+	  requiredDuringSchedulingIgnoredDuringExecution: 
+	    - matchExperessions:
+		- key: "color"
+		- operator: "In"
+		- values: 
+ 		    - "red"	
+      tolerations:
+	- key: "color"
+	  operator: "Equal"
+	  value: "red"
+	  effect: "NoSchedule"
+      containers:
+        - name: nginx
+	  image: nginx:1.18
+     
+	
+kubectl apply -f ./dep-def.yml
+
+kubectl label node kubeworker1 color=red
+kubectl describe nodes
+
+kubectl label node kubeworker1 color=blue
+
+vim ./depb-def.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-blue
+  namespace: dev
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+	app: nginx
+    spec:
+     affinity:
+	nodeAffinity:
+	  requiredDuringSchedulingIgnoredDuringExecution: 
+	    - matchExperessions:
+		- key: "color"
+		- operator: "In"
+		- values: 
+ 		    - "blue"	
+      tolerations:
+	- key: "color"
+	  operator: "Equal"
+	  value: "blue"
+	  effect: "NoSchedule"
+      containers:
+        - name: nginx
+	  image: nginx:1.18
+     
+	
+kubectl apply -f ./depb-def.yml 
+-------------------------------------------------------------
+kubectl taint node kubemaster1 node-role.kubernetes.io/master.NoSchedule
+kubectl get nodes --show-labels
+
+kubectl taint node worker1 color-   ---> delete taint
+kubectl label node worker1 color-   ----> delete label
+
+-----------------------------------------------------------
+------------RESOURSE REQUIRMENTS AND LIMITS----------------
+
+(resourse requiest for per container difinition)
+
+vim ./pod-difinition.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-webapp-color
+  labels:
+    name: simple-webapp-color
+spec:
+  containers:
+  - name: simple-webapp-color
+    image: simple-webapp-color
+    ports:
+      - containerPort: 8080
+    resources:
+      requests:
+	memory: "1Gi"
+	cpu: 1
+      limits:
+        memory: "2Gi"
+	cpu: 2
+
+
+kubectl describe node worker1
+kubectl explain pod.spec.containers.resourses.requests
+kubectl get pods -o wide
+
+kubectl describe node worker1
+
+---------------------------------------------------------------------------
+------------------------DAEMON SETS----------------------------
+(per worker node one launch a pod)
+kubectl explain ds
+
+vim ./daemon-def.yml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: monitoring-daemon
+spec:
+  selector:
+    matchLabels:
+      app: monitoring-agent
+  template:
+    metadata:
+      labels:
+        app: monitoring-agent
+    spec:
+      containers:
+      - name: monitoring-agent
+        image: monitoring-agent
+
+kubectl apply -f ./daemon-de.yml
+kubectl get ds
+kubectl describe ds monitoring-daemon
+---------------------
+-------------------------------------STATIC PODS--------------------
+staticpod-manifest-path = /etc/kubernetes/manifests/   ---> directory for static pods
+static pods in master nodes
+
+kubectl get pods -n kube-system
+
+vim /etc/kubernetes/manifests/static-def.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-sp
+  namespace: dev
+spec:
+  containers:
+    - name: nginx
+      image: nginx:1.18
+
+kubectl apply -f /etc/kubernetes/manifests/static-def.yml
+
+----------------------------------
+--------------------------------------------MULTI SCHEDULER -----------------
+default manifest for scheduler in /etc/kubernetes/manifests/kube-scheduler.yaml
+
+vim  /etc/kubernetes/manifests/my-custom-scheduler.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-custom-scheduler
+  namespace: kube-system
+spec:
+  containers:
+  - command:
+    - kube-scheduler
+    - --address=127.0.0.1
+    - --kubeconfig=/etc/kubernetes/scheduler.conf
+    - --leader-elect=true                   ----> if false not elect and clustering
+    - --scheduler-name=my-custom-scheduler
+    - --lock-object-name=my-custom-scheduler
+    image: k8s.gcr.io/kube-scheduler-amd64:v1.18.12
+    name: kube-scheduler
+
+kubectl apply -f /etc/kubernetes/manifests/my-custom-scheduler.yml
+-------------
+vim ./pod-definiton.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx
+spec:
+  containers:
+  - image: nginx
+    name: nginx
+  schedulerName: my-custom-scheduler
+
+-----------------------
+
+kubectl -n kube-system logs my-custom-scheduler-master -f
+
+
+------------------------------------------------------------------
+--------------------(monitoring solutions metrics server)---------
+kubectl top
+
+--https://github.com/kubernetes-sigs/metrics-server
+installation
+
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+kubectl top
+
+kubectl -n kube-system get pods
+kubectl -n kube-system logs metrics-server...
+
+kubectl -n kube-system get deploy
+
+kubectl -n kube-system edit deploy metics-server
+
+(this here)
+spec:
+      containers:
+      - args:
+        - --cert-dir=/tmp 
+        - --secure-port=4443
+        - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname 
+        - --kubelet-use-node-status-port
+        - --kubelet-insecure-tls
+:wq
+
+kubectl top node
+kubectl top pod -n kube-system
+
+
+kubectl -n kube-system logs -f kube-proxy
+kubectl -n kube-system get events
+
+kubectl -n kube-system logs -f kube-proxy -c (container-name) ---> many container logs
+---------------------------------------------------------
+------------------Application Lifecycle Managment----------------
+
+kubectl rollout status deployment/myapp-deployment   ---> status app
+kubectl rollout history deployment/myapp-deployment
+
+---------
+1)recreate strategy
+2)rolling update strategy
+
+-----
+vim ./deployment-definition.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp-deployment
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-pod
+      labels:
+        app: myapp
+        type: front-end
+      spec:
+        containers:
+        - name: nginx-container
+          image: nginx
+  replicas: 3
+  selector:
+    matchLabels:
+      type: front-end
+
+kubectl apply -f ./deployment-def.yml
+
+kubectl set image deployment/myapp-deployment nginx=nginx:1.9.1  ----> rollingupdate and change image and no foot printing and do not use this command
+kubectl describe deploy myapp
+
+kubectl get rs
+
+kubectl rollout undo deployment/myapp-deploy   ---> rollback
+--------------
+vim ./deploy-def.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-img
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  template:
+    metadata:
+      name: myapp-pod
+      labels:
+        app: myapp
+        type: front-end
+      spec:
+        containers:
+        - name: nginx-container
+          image: nginx
+  replicas: 3
+  selector:
+    matchLabels:
+      type: front-end
+
+kubectl create deployment nginx-img --image nginx:1.17 --replicas 3 -n dev
+kubectl get pods
+kubectl get rs
+
+kubectl rollout status deploy nginx-img
+kubectl scale deployment nginx-img
+kubectl rollout history deploy nginx-img
+kubectl scale deployment nginx-img --replicas 20
+
+
+kubectl rollout history deploy nginx-img   ---> see revisions
+
+kubectl rollout status deploy nginx-img
+
+kubectl edit deploy nginx-img  ---> upgrade manifest with edit command
+
+kubectl rollout status deploy nginx-img
+kubectl get pods
+kubectl rollout history deploy nginx-img  ---> see revesions
+
+kubectl rollout history deploy nginx-img --record=true  --> change-cause add value
+OR
+kubectl annotate deploy nginx-img kubernetes.io/change-caus="set nginx to 1.18"  ---> see history change cause for changes
+
+kubectl rollout undo deploy deploy nginx-img   ---> rollback to later version
+
+kubectl rollout undo deploy nginx-img --to-revision 1  ---> rollback to revision number
+
+kubectl get rs
+kubectl get deploy 
+
+kubectl describe deploy nginx-img
+--------------------------------------------------------------
+kubectl create -f deployment-def.yml  ---> create
+kubectl get deployments   ---> get
+kubectl apply -f deployment-def.yml   ---> update
+kubectl set image deployment/myapp-def nginx=nginx:1.9.1  ---> update
+kubectl rollout status deployment/myapp-deployment   ---> status
+kubectl rollout history deployment/myapp-deployment  ---> history
+kubectl rollout undo deployment/myapp-deployment   ---> rollback
+-----------------------------------------------------------------
+------------------------commands and arguments------------------
+vim ./pod-def.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu-sleeper-pod
+spec:
+  containers:
+    - name: ubuntu-sleeper
+      image: ubuntu-sleeper  ----> FROM ubuntu
+      command: ["sleep2.0"]  ---->ENTRYPOINT ["sleep"]
+      args: ["10"]        ---> CMD ["5"]
+   
+kubectl create -f pod-definittion.yml
+
+-------------
+Dockerfile:
+
+FROM Ubuntu
+ENTRYPOINT ["sleep"]
+CMD ["5"]
+
+docker run --name ubuntu-sleeper \
+--entrypoint sleep2.0
+ubuntu-sleeper 10
+
+-----------------Enviroment Variables-----
+vim ./pod-def.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-webapp-color
+spec:
+  containers:
+  - name: simple-webapp-color
+    image: simple-webapp-color
+    ports:
+      - containerPort: 8080
+    env:
+      - name: APP_COLOR
+        value: pink
+---
+docker run -e APP_COLOR=pink simple-webapp-color
+------------------------------------------
+-----------------------------CONFIGMaps----------------
+(imperative)
+kubectl create configmap \
+<config-name> --from-literal=<key>=<value>
+
+kubectl create configmap \
+app-config --from-literal=APP_COLOR=blue \
+--from-literal=APP_MOD=prod
+
+kubectl create configmap \
+<config-name> --drom-file=<path-to-file>
+
+vim ./app_config.properties
+APP_COLOR: blue
+APP_MODE: prod
+
+kubectl create configmap \
+app-config --from-file=app_config.properties
+
+--------configmap definition
+(declarative)
+vim ./config-map.yml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  APP_COLOR: blue
+  APP_MODE: prod
+
+kubectl create -f config-map.yaml
+kubectl get configmap
+kubectl get cm
+kubectl describe cm app-config
+kubectl get cm app-config --output yaml
+--------------------how to set configmap to pod
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-app-config
+spec:
+  containers:
+    - image: alpine:3.11.3
+      name: pod-app-config
+      envFrom:  
+        - configMapRef:
+            name: app-config
+      command:
+        - sleep
+        - infinity
+kubectl apply -f pod.yml
+kubectl get po --watch
+
+kubectl exec -it pod-app-config -- sh
+env | grep -i app
+
+-------------------------------------------------
+(sample config map)
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-app-config
+spec:
+  containers:
+    - image: alpine:3.11.3
+      name: pod-app-config
+      envFrom:  
+        - configMapRef:
+            name: app-config
+      env:
+        - name: APP_REPLICA
+          value: "2"
+        - name: APP_COLOR
+          valueFrom:
+	    configMapKeyRef:
+	       name: app-config
+               key: APP_COLOR
+      command:
+        - sleep
+        - infinity
+
+------------------
+vim ./configmap.yml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  config.env: |
+    this is the configuration file
+    this is a multiline file
+kubectl apply -f configmap.yml
+
+(volume for configmap)
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-app-config
+spec:
+  volumes:
+    - name: app-config-volume
+      configMap:
+        name: app-config
+  containers:
+    - image: alpine:3.11.3
+      name: pod-app-config
+     
+      command:
+        - sleep
+        - infinity
+      volumeMounts:
+        - name: app-config-volume
+          mountPath: /mnt/config
+kubectl appy -f ./pod.yml
+kubectl describe cm app-config
+kubectl exec -it pod-app-config -- sh
+ls /mnt/config
+--------------------------------------
+1)
+ENV
+envForm:
+  - configMapRef:
+      name: app-config
+
+--
+2)
+SINGLE ENV
+env:
+  - name: APP_COLOR
+    valueFrom:
+      configMapKeyRef:
+        name: app-config
+        key: APP_COLOR
+3)
+VOLUME
+volumes:
+- name: app-config-volume
+  configMap:
+    name: app-config
+
+-------------
+argoCD
+flax
+------------
+-------------------------------secret--------------------
+(imperative)
+kubectl create secret generic \
+<secret-name> --from-literal=<key>=<value>
+
+kubectl create secret generic \
+app-secret --from-litral=DB_Host=mysql \
+--from-literal=DB_User=root \
+--from-literal=DB_Password=paswrd
+
+kubectl create secret generic \
+<secret-name> --from-file=<path-to-file>
+
+vim ./app_secret.properties
+DB_Host: mysql
+DB_User: root
+DB_Password: paswrd
+
+kubectl create secret generic \
+app-secret --from-file=app_secret.properties
+
+-----------
+(declarative)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+data:
+  DB_Host: bxlzcWw=    ----> echo -n "mysql" | base64
+  DB_User: cm9vdA==    ----> echo -n "root" | base64
+  DB_Password: cGFzd3Jk ---> echo -n "pasword" | base64
+
+kubectl create -f secret-data.yaml
+---------
+kubectl get secret app-secret -o yaml
+kubectl get secrets
+kubectl describe secrets
+
+echo -n 'bxlzcWw=' | base64 --decode  ---> decode base64
+---inject secret to pod-def---
+vim ./pod-definiton.yml
+apiVersion: Pod
+kind: Pod
+metadata:
+  name: simple-webapp-color
+  labels:
+    name:
+spec:
+  containers:
+  - name: simple-webapp-color
+    image: simple-webapp-color
+    ports:
+      - containerPort: 8080
+    envFrom:
+      - secretRef:
+          name: appsecret
+
+--------
+1)
+ENV:
+envFrom:
+  - secretRef:
+      name: app-config
+
+2)
+SINGLE ENV
+env:
+  - name: DB_Password
+    valueFrom:
+      secretKeyRef:
+        name: app-secret
+        key: DB_Password
+
+3)
+VOLUME
+volumes:
+- name: app-secret-volume
+  secret:
+    secretName: app-secret
+
+----------------Multi-Container Pods--------------------------
+Multi container for this reason:
+1)LOG Agent
+2)WEB Server
+
+vim ./pod-def.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: simple-webapp
+  labels:
+    name: simple-webapp
+spec:
+  containers:
+  - name: simple-webapp           ----> container1: Webserver
+    image: simple-webapp
+    ports:
+      - containerPort: 8080
+  - name: log-agent               ----> container2: Log Agent
+    image: log-agent
+
+----------mount path to containers -----
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-multicontainer
+spec:
+  volumes:
+    - name: config
+      configMap:
+        name: app-config
+  containers:
+    - name: nginx
+      image: nginx:1.17
+      volumeMounts:
+        - name: config
+          mountPath: /mnt/config
+    - name: debugger
+      image: alpine:3.11.3
+      command:
+        - sleep
+        - infinity
+       volumeMounts:
+        - name: config
+          mountPath: /mnt/config
+
+kubectl apply -f ./pod.yml
+kubectl get pods
+
+kubectl exec -it pod-multicontainer -c debugger -- sh
+curl http://localhost:80
+
+kubectl get cm
+
+kubectl exec -it pod-multicontainer -- sh
+
+----------- init containers ---------------
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+spec:
+  containers:
+  - name: myapp-container
+    image: busybox:1.28
+    command: ['sh' , '-c' , 'echo the app is running && sleep 3600']
+  initContainers:
+  - name: init-myservice
+    image: busybox:1.28
+    command: ['sh', '-c' , 'until nslookup myservice; do echo waiting for myservice; sleep 2; done;']
+  - name: init-myweb
+    image: busybox:1.28
+    command: ['sh' , '-c' , 'until nslookup mydb ; do echo waiting for mydb; sleep 2;done;']
+
+kubectl apply -f ./pod.yml
+
+-------------------use case init container clone git and run apps----
+
+vim ./pod-def.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pod-Multi
+spec:
+  volumes:
+    - name: myvol
+      empityDir:
+        sizeLimit: 10Mi
+  initContainers:
+    - name: config-creator
+      image: busybox:1.32.0
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "$(date) here is your config" > /mnt/vol/init.txt
+          sleep 5
+      volumeMounts:
+        - name: myvol
+          mountPath: /mnt/vol
+    - name: git-cloner
+      image: busybox:1.32.0
+      command:
+      - /bin/sh
+        - -c
+        - echo "$(date) here is your git repository" > /mnt/vol/init2.txt
+      volumeMounts:
+        - name: myvol
+          mountPath: /mnt/vol
+  containers:
+    - name: nginx
+      image: nginx:1.17
+      volumeMounts:
+        - name: myvol
+          mountPath: /mnt/vol
+    - name: debugger
+      image: alpine:3.11.3
+      command:
+        - sleep
+        - infinity
+      volumeMounts:
+        - name: myvol
+          mountPath: /mnt/vol
+
+kubectl apply -f ./pod-def.yml
+kubectl get pods -w
+
+kubectl exec -it pod-multi -c debugger -- sh
+cat /mnt/vol/init1.txt
+kubectl describe pod pod-multi
+
+-------------------------------------container probes-----------------
+health check
+1) livenessProbe
+2)readinessProbe
+3)startupProbe      ----> v1.19 to after
+
+---container Probes - Diagnostic(kubelet handler)
+1)ExecAction
+2)TCPSocketAction
+3)HTTPGetAction
+
+---container probes - liveness
+
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    test: liveness
+  name: liveness-exec
+spec:
+  containers:
+  - name: liveness
+    image: k8s.gcr.io/busybox
+    args:
+    - /bin/sh
+    - -c
+    - touch /tmp/healthy; sleep 30;rm -rf /tmp/healthy; sleep 600
+    livenessProbe:
+      exec:
+        command:
+        - cat
+        - /tmp/healthy
+      initialDelaySeconds: 5
+      periodSeconds: 5
+
+kubectl apply -f ./pod.yml
+
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: liveness
+spec:
+  containers:
+    - name: liveness
+      image: busybox:1.32
+      command:
+        - /bin/sh
+        - -c
+        - |
+          touch /tmp/healthy
+          sleep 5
+          rm -f /tmp/healthy
+          sleep 20
+      livenessProbe:
+        exec:
+          command:
+            - cat
+            - /tmp/healthy
+        initialDelaySeconds: 1
+        periodSeconds: 1
+        failureThreshold: 1
+kubectl apply -f ./pod.yml
+kubectl get pods
+kubectl describe pod pod.yml
+------------------------container porbes - liveness - httpget---
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    test: liveness
+  name: liveness-http
+spec:
+  containers:
+  - name: liveness
+    image: k8s.gcr.io/liveness
+    args:
+    - /server
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+        httpHeaders:
+        - name: Custom-Header
+          value: Awesome
+      initialDelaySeconds: 3
+      periodSeconds: 3
+kubectl apply -f ./pod.yml
+
+----container probes - tcpsocket
+apiVersion: v1
+kind: Pod
+metadata:
+  name: goproxy
+  labels:
+    app: goproxy
+spec:
+  containers:
+  - name: goproxy
+    image: k8s.gcr.io/goproxy:0.1
+    ports:
+    - containerPort: 8080
+    readinessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 10
+    livenessProbe:
+      tcpSocket:
+        port: 8080
+      initialDelaySeconds: 15
+      periodSeconds: 20
+
+------container probes - startup
+ports:
+- name: liveness-port
+  containerPort: 8080
+  hostPort: 8080
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: liveness-port
+  failureThreshold: 1
+  periodSeconds: 10
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: liveness-port
+  failureThreshold: 30
+  periodSeconds: 10
+
+------------------------------------maintenance node---
+kube-controller-manager --pod-eviction-timeout=5m0s   ---> 
+---------os upgrade - Drain a node
+kubectl drain node-1     ---> unschedulabel for node and delete pods and motion pod another node
+
+kubectl uncordon node-1   ---> uncordon a node an scedulabel node
+kubectl cordon node-2    ----> unschedulabel node and not delete pods and pods on in node
+kubectl uncordon node-2
+
+--------------------------k8s Release-----
+kubectl get node
+
+V1.11.3
+MAJOR.MINOR.PATCH
+     .Features(functionalities).Bug Fixes
+
+
+-----permissible version skew
+
+kube-apiserver   --> x v1.10
+controller-manager  --> x-1
+kube-scheduler   --> x-1
+kubelet  ---> x-2
+kube-proxy   --> x-2
+kubectl   --> x+1 or x-1
+
+-----cluster upgrade process - options
+
+kubectl upgrade plan
+kubectl upgrade apply v1.13.14
+
+--------
+1) upgrade the master nodes
+2) upgrade the worker nodes
+
+------cluster upgrade process - worker nodes upgrade strategies ---
+all at once
+-1/+1
++1/-1
+
+------upgrade the master node ---
+kubeadm upgrade plan
+apt install kubeadm=$NEW_VERSION-00 --yes
+kubeadm upgrade apply $NEW_VERSION
+kubectl get nodes
+apt install kubelet=$NEW_VERSION-00 --yes
+systemctl restart kubelet
+kubectl get nodes
+
+-----upgrade the worker nodes
+kubectl drain node $NODE_NAME
+apt install kubeadm=$NEW_VERSION-00 --yes
+apt install kubelet=$NEW_VERSION-00 --yes
+kubeadm upgrade node
+systemctl restart kubelet
+kubectl uncordon node $NODE_NAME
+kubectl get nodes
+
+
+--------------------(end session 5)---------------------------------
+---------------------start session 6 -------------------------------
+------Backup Candidates
+
+1) Resource configuration
+2) ETCD Cluster
+3) Persistent Volumes
+
+--- Backup -Resource configuration
+pod-def.yml
+
+apiVersion: v1
+kind: Pod
+
+metadata:
+  name: myapp-pod
+  labels:
+    app: myapp
+    type: front-end
+spec:
+  containers:
+  - name: nginx-container
+    image: nginx
+
+kubectl apply -f ./pod-def.yml
+
+OR ---> backup all resources
+
+kubectl get all --all-namespaces -o yaml > all-deploy-services.yaml
+
+OR
+
+VELERO app for backup tool and backup persistent volumes
+
+----
+
+---backup - ETCD
+
+ETCD by default data is this directory --> /var/lib/etcd
+
+---
+---backup etcd 
+
+ETCDCTL_API=3 etcdctl \
+snapshot save snapshot.db \
+--endpoints=https://127.0.0.1:2379 \
+--cacert=/etc/etcd/ca.crt \
+--cert=/etc/etcd/etcd-server.crt \
+--key=/etc/etcd/etcd-server.key
+
+ls ./
+
+ETCDCTL_API=3 etcdctl \
+snapshot status snapshot.db
+
+----Restore - ETCD
+
+service kube-apiserver stop
+
+ETCDCTL_API=3 etcdctl \
+snapshot restore snapshot.db \
+--data-dir /var/lib/etcd-from-backup \
+--initial-cluster master-1=https://192.168.5.11:2380,master-2=https://192.168.5.12:2380 \
+--inital-cluster-token etcd-cluster-1 \
+--initial-advertise-peer-urls https://${INTERNAL_IP}:2380
+
+systemctl daemon-reload
+service etcd restart
+service kube-apiserver start
+
+-----------------
+---DESIGN A K8S Cluster
+
+-Hosting Production Applications
+
+-considerations for large clusters
+1)up to 5K PODs in the cluster
+2)up to 150K PODs in the cluster
+3)up to 300K total containers
+4)up to 100 PODs per node
+
+--cloud or On-prem
+use kubeadm/kops/kubespray for on-prem
+1)GKE for GCP
+2)EKS for AWS
+3)AKS for Azure
+
+---STORAGE
+
+1) High Performance - SSD Backed Storage
+2)Multiple Concurrent Connections - Network-based Storage
+3)persistent Shared Volumes - for Shared Access Across Multiple PODs
+
+Tips:
+
+Label nodes with specific disk types
+use node selectors to assign applications to nodes with specific disk types
+
+----
+
+------------------HA k8s cluster
+controller-manager and scheduler HA(Active - Standby)
+
+kube-controller-manager --leader-elect true [other options]
+--leader-elect-lease-duration 15s
+--leader-elect-renew-deadline 20s
+--leader-elect-retry-period 2s
+
+------
+
+kubectl get endpoints ---> see all endpoints
+---
+An HA Cluster - ETCD 
+
+1)Stacked topology
+2)External ETCD topology
+
+External ETCD topology
+cat /etc/systemd/system/kube-apiserver.service
+
+--etcd-servers=https://10.240.0.10:2379,https://10.240.0.11:2379
+
+----Number of ETCD nodes
+the minimum required nodes in an HA setup is 3
+
+instances     Fault Tolerance
+1             0
+2             0
+3             1
+4             1
+5             2
+6             2
+7             3
+
+---
+--------------DEPLOY A K8S CLUSTER
+1) the hard way
+2) with kubeadm
+
+---------------
+
+kubectl cluster-info
+
+--- >sonobuoy App for test k8s
+
+--------------------upgrade k8s
+master node:
+
+1) kubeadm upgrade plan
+
+2) apt install kubeadm=1.18.15-00  OR 1.19.7-00
+
+3) kubeadm upgrade apply v1.18.15
+
+4) apt install kubelet=1.18.15-00
+ 
+5) systemctl restart kubelet
+
+apt-mark hold kubelet kubeadm
+
+--
+worker node:
+
+1) kubectl drain kube-worker-1 --ignore-daemonsets
+
+2) ssh kube-worker-1
+
+3) sudo apt install kubeadm=1.18.15-00
+
+4) apt install kubelet=1.18.15-00
+
+5) kubeadm upgrade node
+
+6) systemctl restart kubelet
+
+7) kubectl uncordon kube-worker-1
+
+apt-mark hold kubelet kubeadm
+
+kubectl get nodes
+----------------------
+
+---------------backup ETCD-------
+export RELEASE="3.4.13"
+
+wget https://github.com/etcd-io/etcd/releases/download/v${RELEASE}/etcd-v${RELEASE}-linux-amd64.tar.gz ---> download etcdctl
+tar -xvf ./etcd..
+sudo install etcd-v.... /usr/local/bin/
+
+etcdctl version
+
+kubectl get nodes
+
+kubectl get deploy -n dev
+
+etcdctl snapshot save snapshot20210202.db --cert=""  --cacert="" --key=""
+etcdctl snapshot status snapshot20210202.db --cert=""  --cacert="" --key=""
+
+kubectl delete namespace dev
+
+-----Restore ETCD Backup
+
+kubectl get node
+
+etcdctl snapshot restore snapshot20210202.db --data-dir /var/lib/etcd-from-backup --initial-cluster kubemaster-1=https://192.168.100.11:2380 --initial-advertise-peer-urls https://192.168.100.11:2380 --name=kubemaster1
+ls /var/lib/etcd*
+
+vim /etc/kubernetes/manifests/etcd.yaml
+
+
+
+vim /etc/kubernetes/manifests/etcd.yaml
+
+mv /etc/kubernetes/kube-api /etc/kubernetes/manifests/
+
+kubectl get all -A
+
+
+-----------------------------Session 7 (backup and restore ETCD)-------------
+
+etcdctl version
+
+cd /etc/kubernetes/
+
+ls ./
+
+kubectl get ns
+
+kubectl get pods -n dev
+
+etcdctl --cert=/etc/kubernetes/pki/etcd/server.crt --cacert=/etc/kubernetes/pki/etcd/ca.crt --key=/etc/kubernetes/pki/etcd/server.key snapshot save snapshot.db
+
+
+etcdctl --cert=/etc/kubernetes/pki/etcd/server.crt --cacert=/etc/kubernetes/pki/etcd/ca.crt --key=/etc/kubernetes/pki/etcd/server.key snapshot status snapshot.db
+
+kubectl delete ns dev
+
+kubectl get pods -n dev
+
+mv /etc/kubernetes/manifests/kube-apiserver.yaml .  ---> kube-apiserver down
+
+kubectl get ns
+
+
+etcdctl snapshot restore snapshot.db --data-dir (new directory)/var/lib/etcd-from-backup --initial-cluster kubemaster-1=https://192.168.100.11:2380 --initial-advertise-peer-urls https://192.168.100.11:2380 --name=kubemaster-1
+
+
+ll /var/lib/etcd-from-backup/
+
+vim /etc/kubernetes/manifests/etcd.yaml
+
+
+volumes:
+  - hostPath:
+      path: /var/lib/etcd-from-backup   ---> set new directory
+      type: DirectoryOrCreate
+    name: etcd-data
+
+
+
+mv /etc/kubernetes/kube-apiserver.yaml ./manifests/  ---> kube-apiserver down
+
+
+
+kubectl get ns
+
+---------------------Security---------------------
+
+Authorization:
+
+1) RBAC Authorization   (role base access control)
+2) ABAC Authorization  (attribute base access control)
+3) Node Authorization
+4) Webhook Mode             (out sourse authorization to kerbros)
+
+-----------------AUTHENTICATION-----
+
+access:
+
+1) Admins
+2) Developers
+3) End Users
+
+---
+
+Users:
+
+kubectl create user user1
+kubectl list users
+
+Service Accounts:
+
+kubectl create serviceaccount sa1
+kubectl list serviceaccount
+
+--------------------------
+curl https://kube-server-ip:6443
+
+----------Auth Mechanisms - Basic
+--static password file
+vim user-details.csv
+password123,user1,u0001
+password123,user2,u0002
+password123,user3,u0003
+
+vim /etc/kubernetes/manifests/kube-apiserver.service
+...
+--basic-auth-file=user-details.csv
+
+curl -v -k https://master-node-ip:6443/api/v1/pods -u "user1:password123"
+
+------static Token file
+
+vim ./user-token-details.csv
+(token),user10,u0010,group1
+(token),user11,u0011,group1
+
+curl -v -k https://master-node-ip:6443/api/v1/pods --header "Authorization: Bearer (token)"
+
+----Auth Mechanisms - Basic - Note
+
+------TLS IN K8S------------
+
+what certificates?
+--
+private key
+
+*.key OR *-key.pem
+server.key
+server-key.pem
+client.key
+client-key.pem
+--
+Certificate (Public Key)
+*.crt
+*.pem
+
+server.crt
+server.pem
+client.crt
+client.pem
+--
+CA server:
+certbot 
+
+--
+
+---------------------Certificate Authority(CA)--
+
+1)Generate Keys:
+
+ca.key  
+
+openssl genrsa -out ca.key 2048
+
+2)Certificate Signing Request
+
+ca.csr
+
+openssl req -new -key ca.key -subj "/CN=KUBERNETES-CA" -out ca.csr
+
+3)Sign Certificate
+
+ca.crt
+
+openssl x509 -req -in ca.csr -signkey ca.key -out ca.crt
+
+----
+
+Generate client Certificate - Admin user
+
+-----------------------example ADMIN USER
+1)Generate Keys:
+
+ca.key
+
+openssl genrsa -out admin.key 2048
+
+2)Certificate Signing Request
+
+ca.csr
+
+openssl req -new -key admin.key -subj "/CN=kube-admin" -out admin.csr
+
+3)Sign Certificate
+
+ca.crt
+
+openssl x509 -req -in admin.csr -CA ca.crt -signkey ca.key -out admin.crt
+
+------
+
+openssl req -new -key admin.key -subj "/CN=kube-admin/O=system:masters" -out admin.csr
+
+------
+
+-----Generate Client Certificate 
+
+1)SYSTEM:KUBE-SCHEDULER
+2)SYSTEM:KUBE-CONTROLLER-MANAGER
+3)KUBE-PROXY
+
+
+--HOW TO USE
+
+curl https://kube-apiserver:6443/api/v1/pods \
+--key admin.key --cert admin.crt \
+--cacert ca.crt
+
+vim ./kube-config.yaml
+
+apiVersion: v1
+clusters:
+- cluster:
+    certificate-authority: ca.crt
+    server: https://kube-apiserver:6443
+  name: kubernetes
+kind: Config
+users:
+- name: kubernetes-admin 
+  user:
+    client-certificate: admin.crt
+    client-key: admin.key
+
+--------------------------------------
+
+---Generate Server Certificate - kube API Server
+
+1)openssl genrsa -out apiserver.key 2048
+
+vim ./opensslcnf
+
+[req]
+req_extensions = v3_req
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation,
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = kubernetes
+DNS.2 = kubernetes.default
+DNS.3 = kubernetes.default.svc
+DNS.4 = kubernetes.default.svc.cluster.local
+IP.1 = 10.96.0.1
+IP.2 = 172.17.0.87
+
+
+
+2)openssl req -new -key apiserver.key -subj \          ---> add ips and FQDNs host 
+"/CN=kube-apiserver" -out apiserver.csr --config openssl.cnf
+
+3)openssl x509 -req -in apiserver.csr \
+-CA ca.crt -CAkey ca.key -out apiserver.crt
+
+-------------------------------------------
+
+kubeadm alpha certs check-expiration   ---> information for CA and certificates
+
+kubeadm alpha certs -h
+
+kubeadm alpha certs renew -h   ---> renew certificate
+
+kubeadm alpha certs renew all
+
+ll /etc/kubernetes/pki   ---> see all certs and keys
+
+ll /etc/kubernetes/pki/etcd/
+
+kubectl --kubeconfig admin.conf get ns
+
+---------------------
+
+----View Certificates - Perform Health Check
+
+openssl x509 -in /etc/kubernetes/pki/apiserver.crt -text -noout
+
+--------------------View Logs
+journalctl -u etcd-service -L
+
+docker ps -a
+
+kubectl logs etcd-master
+
+docker logs ..
+
+-------------------------TLS IN K8S CERTIFICATE API----------
+
+--Certificate API
+
+1) create certificatesigningrequest object
+2) review requests
+3) Approve Requests
+4) share certs to users
+
+
+--
+1)
+openssl genrsa -out john.key 2048   ---> create private key
+openssl req -new -key john.key -out john.csr
+
+ls -l    ----> private key (key) and  certificate (csr)
+
+cat john.csr | base64 | tr -d "\n"   ---> copy result  ---> 1
+
+vim ./csr-john.yml
+
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: john
+spec:
+  groups:
+    - system:authenticated
+  request: " (paste here 1) "               ----> 1
+  signerName: kubernetes.io/kube-apiserver-client
+  usages:
+    - client auth
+
+
+
+kubectl apply -f ./csr-john.yml
+
+kubectl get csr john
+
+2)
+kubectl describe csr john | less
+
+3)
+kubectl certificate -h
+
+kubectl certificate approve -h
+
+kubectl certificate approve john
+
+kubectl get csr
+
+kubectl get csr john -o yaml   ---> part status certificate created
+
+kubectl get csr john -ojsonpath='{.status.certificate}'  ---> copy certificate
+
+kubectl get csr john -ojsonpath='{.status.certificate}' | base64 -d  ---> copy result --> 1
+
+
+vim ./john.crt  ---> pate 1
+
+ll john*
+rm john.csr
+
+ll john*   ----> (.crt and .key)
+
+cd /etc/kubernetes/pki
+ll
+
+cd /home/john
+cat ./ca.crt   ---> copy result 2
+vim ./ca.crt    ---> paste result 2
+
+openssl x509 -in john.crt -noout -text  ---> see details certificate
+
+-------who is responsible for CA server
+
+Controller manager
+
+- CSR-APPROVING
+- CSR_SIGNING
+
+cat /etc/kubernetes/manifests/kube-controller-manager.yaml
+
+...
+- --cluster-signing-cert-file=/etc/kubernetes/pki/ca.crt
+- --cluster-signing-key-file=/etc/kubernetes/pki/ca.key
+...
+
+
+-------------------------KUBECONFIG----
+
+---Query K8S Rest API
+
+curl https://my-kube-playground:6443/api/v1/pods \
+--key admin.key
+--cert admin.crt
+--cacert ca.crt
+
+--
+
+kubectl get pods 
+--server my-kube-playground:6443
+--client-key admin.key
+--client-certificate admin.crt
+--certificate-authority ca.crt
+
+-----KubeConfig File (Authentication)
+
+kubectl get pods --kubeconfig config
+
+----sample for kubeconfig file
+
+apiVersion: v1
+kind: Config
+
+clusters:
+- name: my-kube-playground
+  cluster:
+    certificate-authority: ca.crt
+    server: https://my-kube-playground:6443
+
+contexts:
+- name: my-kube-admin@my-kube-playground
+  context:
+    cluster: my-kube-playground
+    user: my-kube-admin
+
+users:
+- name: my-kube-admin
+  user:
+    client-certificate: admin.crt
+    client-key: admin.key
+
+
+----multi contexts
+
+vim $home/.kube/config
+
+apiVersion: v1
+kind: Config
+
+current-context: dev-user@google
+
+clusters:
+- name: my-kube-deployment
+- name: development
+- name: production
+- name: google
+
+contexts:
+- name: my-kube-admin@my-kube-playground
+- name: dev-user@google
+- name: prod-user@production
+
+users:
+- name: my-kube-admin
+- name: admin
+- name: dev-user
+- name: prod-user
+
+
+kubectl config view             ----> view config file
+
+kubectl config view --kubeconfig=my-custom-config   ----> view config file
+
+vim ./kubeconfig-path.yaml
+
+apiVersion: v1
+kind: Config
+
+clusters:
+  - name: cka
+    cluster:
+      server: https://kubemaster-1:6443
+      certificate-authority: ./ca.crt
+
+users:
+  - name: john
+    user:
+      client-certificate: john.crt
+      client-key: john.key
+
+contexts:
+  - name: john@cka
+    context: 
+      cluster: cka
+      user: john
+      namespace: dev
+
+kubectl get nodes  --kubeconfig kubeconfig-path.yaml
+
+---see Error from Forbidden
+
+kubectl --kubeconfig kubeconfig-path.yaml config view
+
+kubectl --kubeconfig kubeconfig-path.yaml config get-contexts
+
+kubectl --kubeconfig kubeconfig-path.yaml config get-users
+
+-----use base64 in kubeconfig
+
+cat ca.crt | base64 | tr -d "\n"  ---> copy 3
+
+cat john.crt | base64 | tr -d "\n"   ---> copy 4
+
+cat john.key | base64 | tr -d "\n"  ----> copy 5
+
+vim ./kubeconfig-path.yaml
+
+apiVersion: v1
+kind: Config
+
+clusters:
+  - name: cka
+    cluster:
+      server: https://kubemaster-1:6443
+      certificate-authority-data: "pate 3"   ----> paste 3
+
+users:
+  - name: john
+    user:
+      client-certificate-data: "paste 4"   ---> paste 4
+      client-key-data: "paste 5"      ---> paste 5
+
+contexts:
+  - name: john@cka
+    context: 
+      cluster: cka
+      user: john
+      namespace: dev
+
+
+-----create user and permition admin and new context 
+
+vim ./kubeconfig-path.yaml
+
+apiVersion: v1
+kind: Config
+
+clusters:
+  - name: cka
+    cluster:
+      server: https://kubemaster-1:6443
+      certificate-authority-data: "pate 3"   ----> paste 3
+
+users:
+  - name: john
+    user:
+      client-certificate-data: "paste 4"   ---> paste 4
+      client-key-data: "paste 5"      ---> paste 5
+  - name: admin
+    user: 
+      client-certificate-data: ""     ----> repeat 4
+      client-key-data: ""             ----> repeat 5
+
+contexts:
+  - name: john@cka
+    context: 
+      cluster: cka
+      user: john
+      namespace: dev
+  - name: admin@cka
+    context:
+      cluster: cka
+      user: admin
+      namespace: kube-system
+
+kubectl --kubeconfig kubeconfig-content.yaml get pod
+
+kubectl --kubeconfig kubeconfig-content.yaml config current-context       ---> see context 
+
+kubectl --kubeconfig kubeconfig-content.yaml config use-context admin@cka   ----> change context
+
+kubectl --kubeconfig kubeconfig-content.yaml get nodes  ---> see all nodes because permit
+
+export KUBECONFIG=$(pwd)/kubeconfig-content.yaml
+
+kubectl get nodes
+
+kubectl config get-contexts    
+
+unset KUBECONFIG
+
+OR 
+
+cp kubeconfig-content.yaml ~/.kube/
+
+mv ~/.kube/kubeconfig-content.yaml ~/.kube/config
+
+kubectl config get-contexts
+
+kubectl config use-context proud-user@production   ---> change context and change in file config
+
+kubectl config -h
+
+echo "code hash" | base64 --decode   ----> decode hash code
+
+----------------------------------------------------------------------------------
+
+-------------------------API GORUPS(session 8)---------------------------------
+
+curl https://kube-master:6443/version
+
+curl https://kube-master:6443/api/v1/pods
+
+---API
+
+/metrics    /healthz    /version   /api   /apis   /logs
+
+core group  ---> /api
+named group ---> /apis
+
+-----
+
+core group:
+
+/api   --->  /v1  |--> namespaces,events,bindings,configmaps
+                  |--> pods,endpoints,pv,secrets
+                  |--> rc,nodes,pvc,services
+
+named group:
+
+/apis:  ----> /apis             |--> /apps,/v1--> (Resources)/deployments|          ,/replicasets , /statefulsets
+                                |                                (verbs)  |--> list
+                                |                	                 |--> get
+				|			                 |--> create
+                                |--> /extensions                         |--> delete
+                                |               	                 |--> update
+                                |                	                 |--> watch
+                                |-->/networking.k8s.io --> /v1-->/networkpolicies 
+                                |-->/storage.k8s.io
+                                |-->/authentication.k8s.io
+                                |-->/certificates.k8s.io --> /v1 --> /certificatesigningrequests
+
+----
+see all apies:
+
+curl http://localhost:6443 -k
+curl http://localhost:6443/apis -k | grep "name"
+
+curl http://localhost:6443 -k \
+--key admin.key
+--cert admin.crt
+--cacert ca.crt
+
+OR
+
+kubectl proxy:
+
+curl http://localhost:6443 -k
+or
+kubectl proxy
+curl http://localhost:8001 -k
+--
+kube proxy != kubectl proxy
+--
+----------------------authorization---
+
+kubectl delete node worker-1
+
+--
+Authorization Mechanisms:
+1) Node Authorization
+2) Attribute-based Authorization(ABAC)
+3) Role-Based Authorization(RBAC)
+4) Webhook
+
+----------
+Node Authorization:
+
+Read:
+. services
+. Endpoints
+. Nodes
+. Pods
+Write:
+. Node status
+. Pod status
+. events
+
+ABAC:
+
+{"kind": "policy", "spec": {"user": "dev-user", "namespace": "*", "resource": "pods", "apiGroup": "*"}}
+{"kind": "policy", "spec": {"user": "dev-user-2", "namespace": "*", "resource": "pods", "apiGroup": "*"}}
+{"kind": "policy", "spec": {"user": "security", "namespace": "*", "resource": "car", "apiGroup": "*"}}
+
+RBAC:
+
+webhook:
+
+authorization proxy: Open Policy Agent(OPA)
+
+Authorization Mode:
+. Node Authorization
+. Attribute-based Authorization(ABAC)
+. Role-Based Authorization(RBAC)
+. Webhook
+. AlwaysAllow
+. AlwaysDeny
+
+https://github.com/aquasecurity/trivy
+
+admission controller  ---> check image for container
+
+RBAC:
+
+For Developer:
+. Can view PODS
+. Can create PODS
+. Can Delete PODS
+. Can create ConfigMap
+
+vim ./developer-role.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["list", "get", "create", "update", "delete"]
+- apiGroups: [""]
+  resources: ["ConfigMap"]
+  verbs: ["create"]
+
+kubectl create -f developer-role.yaml
+
+
+--if not namespace in manifest then default
+
+--bind role
+
+vim ./devuser-developer-binding.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: devuser-developer-binding
+subjects:
+- kind: User
+  name: dev-user                            ----> user
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: developer                           ---> role
+  apiGroup: rbac.authorization.k8s.io
+
+kubectl apply -f ./devuser-developer-binding.yaml
+
+---Roles - Ops
+
+kubectl get roles
+kubectl get rolebindings
+kubectl describe role developer
+kubectl describe rolebinding devuser-developer-binding
+
+---Check Access
+
+kubectl auth can-i create deployments
+
+kubectl auth can-i delete delete nodes
+
+kubectl auth can-i create deployments --as dev-user
+
+kubectl auth can-i create pods --as dev-user
+
+kubectl auth can-i create pods --as dev-user --namespace test
+
+---Resource Names
+
+vim ./developer-role.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "create", "update"]
+  resourceNames: ["blue", "orange"]
+
+--------------
+---demo authorization
+
+kubectl config current-context
+
+kubectl config get-contexts
+
+kubectl get nodes
+
+kubectl config use-context john@cka
+kubectl get pods
+
+----tools kubectx for switch context
+kubectx
+-----
+
+kubectl auth can-i create deployments -n kube-system --as john
+
+----
+
+kubectl explain Role
+kubectl explain role.rules
+kubectl explain pod
+
+vim ./dev-role-def.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+  namespace: dev
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - "pods"
+    verbs: 
+      - "list"
+      - "get"
+  - apiGroups:
+      - "apps"
+    resources:
+      - "deployments"
+    verbs:
+      - "list"
+      - "get"
+      - "watch"
+    resourceNames:
+      - "nginx"     --> see deployment only nginx
+
+kubectl apply -f ./dev-role-def.yaml
+kubectl explain rolebinding
+kubectl explain rolebinding.roleRef
+kubectl explain deploy
+
+vim ./rolebinding-def.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: john-developer
+  namespace: dev
+roleRef:
+  apiGroup: "rbac.authorization.k8s.io"
+  kind: "Role"
+  name: "developer"  
+subjects:
+  - apiGroup: "rbac.authorization.k8s.io"
+    kind: "User"
+    name: "john"
+
+kubectl apply -f ./rolebinding-def.yaml
+
+kubectl get role
+
+kubectl describe role developer
+
+kubectl get rolebindings
+
+kubectl describe rolebindings john-developers
+
+kubectx ~
+
+kubectl get pods
+
+kubectl describe pod ..
+
+kubectl rollout status deploy nginx    ---> verbs: watch
+
+kubectl auth can-i watch deploy
+
+kubectl auth can-i watch deploy -n default
+
+--role and role binding permit on namespaces
+
+--------------------------------------------------
+------Cluster Roles
+
+Resources:
+
+. Namespaced    ---> pods,replicasets,jobs,deployments,services,secrets,roles,rolebindings,configmaps,pvc
+. Cluster Scoped --> nodes,pv,clusterroles,clusterrolebindings,certificatesigningrequests,namespaces
+
+kubectl api-resources --namespaced=true   ---> namespaced resources
+kubectl api-resources --namespaced=false  ---> cluster scoped resources
+
+cluster Admin:
+. Can view Nodes
+. Can create Nodes
+. Can delete Nodes
+
+Storage Admin
+. Can view PVs
+. Can create PVs
+. Can delete PVCs
+
+vim ./cluster-admin-role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cluster-administrator
+rules:
+- apiGroups: [""]
+  resources: ["nodes"]
+  verbs: ["list", "get", "create", "delete"]
+
+kubectl create -f cluster-admin-role.yaml
+
+vim ./cluster-admin-role-binding.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-admin-role-binding
+subjects:
+- kind: User
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cluster-administrator
+  apiGroup: rbac.authorization.k8s.io
+
+kubectl apply -f  ./cluster-admin-role-binding.yaml
+
+----------------------------
+
+kubectl api-resources  ---> show all resource names
+
+---Demo 
+
+kubectl api-resources | grep cluster
+
+vim ./cr-def.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: developer
+rules:
+  - apiGroups:
+      - ""
+      - "apps"
+    resources:
+      - "pods"
+      - "deployments"
+      - "nodes"
+    verbs:
+      - "list"
+  
+
+kunectl apply -f ./cr-def.yaml
+
+vim ./clusterrolebind.yaml
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: john-developer
+roleRef:
+  apiGroup: "rbac.authorization.k8s.io"
+  kind: "ClusterRole"
+  name: "developer"
+subjects:
+  - apiGroup: "rbac.authorization.k8s.io"
+    kind: "User"
+    name: "john"
+
+kubectl apply -f ./clusterrolebind.yaml
+
+kubectl get clusterrole
+
+kubectl describe clusterrole developer
+
+kubectl get clusterrolebindings
+
+kubectl auth can-i list pods
+
+kubectl auth can-i list pods -n default
+
+kubectl get pods --all-namespaces
+
+kubectl get clusterrole   ---> see cluster role
+
+kubectl describe clusterrole system:node
+
+kubectl get clusterrolebindings
+
+kubectl describe clusterrolebindings system:node
+
+kubectl get clusterrolebindings system:node -o yaml
+
+-----------------------------------
+----------IMAGE SECURITY
+
+vim ./nginx-pod.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+spec:
+  containers:
+  - name: nginx
+    image: nginx     ---> image:  docker.io/nginx/nginx  ,  Registry/User Account/Image Repository
+
+--if you want to use repo private then you use for example : gcr.io/kubernetes-e2e-test-images/dnsutils
+
+----Private Repository
+docker login private-registery.io
+
+docker run private-registry.io/apps/internal-app
+
+--create secret to use repo private in kubernetes
+
+kubectl create secret docker-registry regcred \
+--docker-server=private-registry.io \
+--docker-username=registry-user \
+--docker-password=registry-password \
+--docker-email=registry-user@org.com
+
+---
+vim ./nginx-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: nginx-pod
+spec:
+  containers:
+  - name: nginx
+    image: private-registry.io/apps/internal-app
+  imagePullSecrets:                      ---> use definition regcred
+  - name: regcred
+
+----Demo
+
+kubectl -n dev create secret docker-registry ckatestaccount --docker-username=ckatestaccount --docker-password=ckatestaccount --dry-run=client -o yaml > ./docker-registry-secret.yaml
+
+kubectl get secret
+
+vim ./pod.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: priv-pod
+spec:
+  imagePullSecrets:      
+    - name: ckatestaccount  ---> name secret
+  containers:
+    - name: priv-pod
+      image: ckatestaccount/alpine:3.11   ---> account name/image name
+      command:
+        - "sleep"
+        - "infinity"
+kubectl apply -f ./pod.yaml
+kubectl descibe pod priv-pod
+
+https://goharbor.io/
+------------------------------------------------------
+--------SECURITY CONTEXTS-------------------
+
+--container security
+
+docker run --user=1001 ubuntu sleep 3600  ---> run with user 1001
+docker run --cap-add mac_admin ubunut
+
+--kubernetes security
+
+--Security Context - POD vs. Container level
+
+container level:
+
+vim ./pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  containers:
+    - name: ubuntu
+      image: ubuntu
+      command: ["sleep", "3600"]
+      securityContext:
+        runAsUser: 1000
+
+pod level:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  securityContext:
+    runAsUser: 1000
+  containers:
+    - name: ubuntu
+      image: ubuntu
+      command: ["sleep", "3600"]
+
+
+------security context - capabilities
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  containers:
+    - name: ubuntu
+      image: ubuntu
+      command: ["sleep", "3600"]
+      securityContext:
+        runAsUser: 1000
+        capabilities:               ---> per container , not pod
+          add: ["MAC_ADMIN"]     
+
+
+------------------------------------
+
+vim ./deploy.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sc-deploy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sc-pod
+  template:
+    metadata:
+      labels:
+        app: sc-pod
+  spec:
+    securityContext:      
+      - readAsUser: 1000
+    containers:
+      - name: sc-pod
+        image: alpine:3.11
+        command:
+          - "sleep"
+          - "infinity"
+        securityContext:
+          runAsUser: 2000
+          runAsGroup: 2001
+          capabilities:
+            add:
+              - "MAC_ADMIN"
+              - "SYS_ADMIN"
+
+kubectl apply -f ./deploy.yaml
+
+kubectl exec sc-deploy-.123424 -- id
+
+----------------------------------------------------------
+
+----------------network policy(per pods)(9 session)------------------------
+Solutions that Support Network Policies:
+1) kube-router
+2) Calico
+3) Romana
+4) Weave-net
+
+Solution that Do Not support network policy:
+1)Flannel
+-------
+policyTypes:
+- Ingress           ------> allow ingress traffic
+ingress:
+- from:             ----> from api pod
+  - podSelector:
+      matchLabels:
+        name: api-pod
+  ports:                   ----> port 3306
+  - protocol: TCP
+    port: 3306
+
+-----
+vim ./net-p.yml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: db-policy
+spec:
+  podSelector:
+    matchLabels:
+      role: db
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          name: api-pod
+    ports:
+    - protocol: TCP
+      port: 3306
+
+kubectl apply -f ./net-p.yml
+
+---------------------sample for network policy
+manage certificate --->  https://cert-manager.io/
+----------------
+vim ./deployment.yml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webserver
+  namespace: dev
+  labels:
+    app: webserver
+spec:
+  replica: 3
+  selector:
+    matchLabels:
+      app: webserver
+  template:
+    metadata:
+      labels:
+        app: webserver
+    spec:
+      containers:
+        - name: webserver
+          image: nginx:1.17
+kubectl apply -f ./deployment.yml
+----------------
+
+vim ./clusterip.yml
+apiVersion: v1
+kind: Service
+metadata:
+  name: webserver
+  namespace: dev
+spec:
+  type: ClusterIP
+  selector:
+    app: webserver
+  ports:
+    - port: 80
+      targetPort: 80
+
+kubectl apply -f ./clusterip.yml
+-------------
+vim ./deployment-green.yml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: green
+  namespace: dev
+  labels:
+    app: green
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: green
+  template:
+    metadata:
+      labels:
+        app: green
+    spec:
+      containers:
+        - name: green
+          image: alpine:3.11
+          command:
+            - "sleep"
+            - "infinity"
+kubectl apply -f ./deployment-green.yml
+
+-------
+
+vim ./deployment-red.yml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: red
+  namespace: dev
+  labels:
+    app: red
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: red
+  template:
+    metadata:
+      labels:
+        app: red
+    spec:
+      containers:
+        - name: red
+          image: alpine:3.11
+          command:
+            - "sleep"
+            - "infinity"
+kubectl apply -f ./deployment-red.yml
+
+--------
+
+kubectl exec -it red -c red -- sh
+apk add curl
+curl webserver.dev.svc.cluster.local
+
+------
+vim ./policy-n.yml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: webserver
+  namespace: dev
+spec:
+  podSelector:
+    matchLabels:
+      app: webserver
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: green
+       ports:
+         - port: 80
+           protocol: TCP
+
+kubectl apply -f ./policy-n.yml
+
+kubectl exec -it green -c green -- sh
+apk add curl
+curl webserver.dev.svc.cluster.local
+--------------------------------------------------------
+--------------------------storage------------------------
+
+Objectives:
+
+1) CSI
+2) Persistent Volumes
+3) Persistent Volumes Claims
+4) Storage Class
+5) Stateful Sets
+6) Headless Services
+7) Storage in Stateful Sets
+
+-----conatiner storage interface(CSI)---
+
+https://github.com/container-storage-interface/spec
+
+-----------------persistent volumes---------------
+
+volumes & mounts
+
+vim ./per-vo.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: random-nimber-generator
+spec:
+  containers:
+  - image: alpine
+    name: alpine
+    command: ["/bin/sh","-c"]
+    args: ["shuf -i 0-100 -n 1 >> /opt/number.out;"]
+    volumeMounts:
+    - mountPath: /opt
+      name: data-volume
+  volumes:
+  - name: data-volume
+    hostPath:
+      path: /data
+      type: Directory
+
+kubectl apply -f ./per-vo.yml
+
+-----
+https://rook.io/
+
+-----
+volumes:
+- name: data-volume
+  hostPath:
+    path: /data
+    type: Directory
+---
+volumes:
+- name: data-volume
+  awsElasticBlockStore:
+    volumeID: <volume-id>
+    fsType: ext4
+------------------
+vim ./pod-volume.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: storage-test-hostpath
+  namespace: dev
+spec:
+  volumes:
+    - name: data-volume
+      hostPath:
+        path: /var/local/aaa
+        type: DirectoryOrCreate
+  containers:
+    - name: storage-test-hostpath
+      image: alpine:3.11
+      command:
+        - "sleep"
+        - "infinity"
+      volumeMounts:
+        - mountPath: /mydir
+          name: data-volume
+
+kubectl apply -f ./pod-volume.yml
+
+kubectl -n dev exec -it storage-test-hostpath 
+df -h
+touch txt
+
+
+ssh kube-worker-1
+cd /var/local/aaa/
+ls
+
+kubectl delete pod storage-test-hostpath -n dev
+
+(and recreate pod and see directory is .)
+
+----------------------------------------------------
+--------------------------persistent volume claim(pvc)------
+vim pv-devinition.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce            ---> OR(ReadOnlyMany)OR(ReadWriteOnce)OR(ReadWriteMany)
+  capacity:
+    storage: 1Gi
+  hostPath:
+    path: /tmp/data
+
+kubectl create -f pv-definition.yaml
+kubectl get persistentvolume
+--------pvc on aws
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 1Gi
+  awsElasticBlockStore:
+    volumeID: <volume-id>
+    fsType: ext4
+
+kubectl create -f pv-definition.yaml
+kubectl get persistentvolume
+
+-----
+Binding
+1)sufficient Capacity
+2)Access Modes
+3)Volume Modes
+4) Storage Class
+5) Selector
+---------
+-------create pvc---
+vim ./pvc-definition.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myclaim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi
+
+kubectl create -f pvc-definition.yaml
+
+---pv-definition.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 1Gi
+  awsElasticBlockStore:
+    volumeID: <volume-id>
+    fsType: ext4
+kubectl apply -f pv-definition.yaml
+
+kubectl get persistentvolumeclaim
+kubectl delete persistentvolumeclaim myclaim
+
+if persistentVolumeReclaimPolicy: Retain is delete
+then
+pv is stay and unuse other pvc
+else persistentVolumeReclaimPolicy: delete
+pv is delete
+else persistentVolumeReclaimPolicy: Recycle
+delete data on pv and if come new pvc use pv
+
+-----using pvcs in pods
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mypod
+spec:
+  containers:
+    - name: myfrontend
+      image: nginx
+      volumeMounts:
+      - mountPath: "/var/www/html"
+        name: mypd
+  volumes:
+    - name: mypd
+      persistentVolumeClaim:
+        claimName: myclaim
+
+------
+step1:
+1) create pv
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 100Mi
+  hostPath:
+    path: /var/local/aaa1
+  persistentVolumeReclaimPolicy: Retain
+
+2) create pv
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol2
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 10Mi
+  hostPath:
+    path: /var/local/aaa2
+  persistentVolumeReclaimPolicy: Retain
+
+3) create pv
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol3
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 1Mi
+  hostPath:
+    path: /var/local/aaa3
+  persistentVolumeReclaimPolicy: Retain
+
+----(117 minute session 9)
+step2:
+create pvc:
+
+vim ./pvc-def.yml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myclaim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi
+
+kubectl create -f pvc-def.yml
+
+kubectl get persistentVolumeClaim
+
+------for example pv-definition.yaml for up pvc
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 1Gi
+  awsElasticBlockStore:
+    volumeID: <volume-id>
+    fsType: ext4
+
+kubectl get persistentVolumeClaim
+
+kubectl delete pvc myclaim
+
+---------pvc policy
+
+persistentVolumeReclaimPolicy: Retain  ---> if delete pvc and unuse pv other pvc
+
+persistentVolumeReclaimPolicy: Delete   ---> if delete pvc and delete pv
+
+persistentVolumeReclaimPolicy: Recycle  ---> if delete pvc and useable pv other pvc
+
+-----
+--Using PVCs in PODs
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mypod
+spec:
+  containers:
+    - name: myfrontend
+      image: nginx
+      volumeMounts:
+      - mountPath: "/var/www/html"
+        name: mypd
+  volumes:
+    - name: mypd
+      persistentVolumeClaim:
+        claimName: myclaim
+
+kubectl apply -f ./pod.yml
+
+
+----
+step by step use pv and pvc
+
+step1) create 3 pv
+step2) create pvc
+step3) create pod
+
+-----------example
+
+vim ./pv-definition.yml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 500Mi
+  gcePersistentDisk:
+    pdName: pd-disk
+    fsType: ext4
+
+kubectl apply -f ./pv-definition.yml
+
+vim ./pvc-definition.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myclaim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 500Mi
+
+kubectl apply -f ./pvc-definition.yaml
+
+vim ./pod-definition.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: random-number-generator
+spec:
+  containers:
+    - image: alpine
+      name: alpine
+      command: ["/bin/sh","-c"]
+      args: ["shuf -i 0-100 -n 1 >> /opt/number.out;"]
+      volumeMounts:
+      - mountPath: /opt
+        name: data-volume
+  volumes:
+  - name: data-volume
+    persistentVolumeClaim:
+      claimName: myclaim
+kubectl apply -f ./pod-definition.yml
+------------------------storage classes----------------------------
+
+---google cloud persistent disk
+
+--static provisioning
+
+gcloud beta compute disks create \
+--size 1GB
+--region us-east1
+pd-disk
+
+vim ./pv-def.yml
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce
+  capacity:
+    storage: 500Mi
+  gcePersistentDisk:
+    pdName: pd-disk
+    fsType: ext4
+
+kubectl apply -f ./pv-def.yml
+
+------
+--Dynamic provisioning
+
+vim ./sc-definition.yaml
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: google-storage
+provisioner: kubernetes.io/gce-pd
+
+
+vim ./pvc-definiton.yml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myclaim
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: google-storage
+  resources:
+    requests:
+      storage: 500Mi
+
+
+vim ./pod-definition.yaml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: random-number-generator
+spec:
+  containers:
+  - image: alpine
+    name: alpine
+    command: ["/bin/sh","-c"]
+    args: ["shuf -i 0-100 -n 1 >> /opt/a"]
+    volumeMounts:
+      mountPath: /opt
+      name: data-volume
+  volumes:
+  - name: data-volume
+    persistentVolumeClaim:
+      claimName: myclaim
+
+
+---------------
+
+https://kubernetes.io/docs/concepts/storage/storage-classes/
+
+storage classes:
+
+1) Silver sc
+
+vim ./sc-definition.yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: Silver
+provisioner: kubernetes.io/gce-pd
+parameters:
+  type: pd-standard
+  replication-type: node
+
+
+2) Gold sc
+
+vim ./sc-gold-definition.yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gold
+provisioner: kubernetes.io/gce-pd
+parameters:
+  type: pd-ssd
+  replication-type: node
+
+
+3) Platinum sc
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: Platinum
+provisioner: kubernetes.io/gce-pd
+parameters:
+  type: pd-ssd
+  replication-type: regional-pod
+
+----------------------------------
+
+vim ./sc-def.yml
+
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: test-sc
+provisioner: cinder.csi.openstack.org
+parameters:
+  type: default
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+
+kubectl apply -f ./sc-def.yml
+
+------
+vim ./pvc
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: myclaim
+  namespace: cka-test
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 90Mi
+  storageClassName: test-sc
+
+----
+vim ./pod.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: storage-test-sc
+  namespace: cka-test
+spec:
+  volumes:
+    - name: data-volume
+      persistentVolumeClaim:
+        claimName: myclaim
+
+  containers:
+    - name: storage-test-sc
+      image: alpine:3.11
+      command:
+        - "sleep"
+        - "infinity"
+      volumeMounts:
+        - mountPath: /mydir
+          name: data-volume
+
+kubectl apply -f ./pod.yml
+
+---------------------------------------------STATEFUL SET-------------------
+use for database ----> deployment
+
+(single master and multi slave topology)
+1)setup master first and then slave
+2)clone data from the master to slave-1
+3)enable continuous replication from master to slave-1
+4)wait for slave-1 to be ready
+5)clone data from slave-1 to slave-2
+6)enable continuous replication from master to slave-2
+7)configure master address on slave
+
+-----
+vim ./statefulset-definition.yml
+
+apiVersion: apps/v1
+kind: StatefulSet 
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+spec:
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+
+  serviceName: mysql-h
+  podManagementPolicy: Parallel
+
+kubectl apply -f statefulset-definition.yml
+kubectl scale statefulset mysql --replicas=5
+
+kubectl delete statefulset mysql
+
+----sample stateful set
+vim ./ser.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name:hs
+  namespace: dev
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: nginx-hs
+  clusterIP: None    ----> Headless Service
+
+--
+vim ./statefulset.yml
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysts
+  namespace: dev
+spec:
+  serviceName: hs
+  replicas:3
+  selector:
+    matchLabels:
+      app: nginx-hs
+  template:
+    metadata:
+      labels:
+        app: nginx-hs
+    spec:
+      containers:
+        - name: hs-pod
+          image: alpine:3.11
+          command:
+            - "sleep"
+            - "infinity"
+
+kubectl apply -f ./statefulset.yml
+kubectl get sts -n dev           
+kubectl -n dev scale sts mysts --replicas 5
+
+in nginx container ---> dig mysts-0.hs.dev.svc.cluster.local
+
+
+vim ./ser.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: dev
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: nginx-hs
+   
+allow in container ---> curl db.dev.svc.cluster.local
+
+----------------------------------------------------
+
+----------------------------HEADLESS SERVICES(Session 10)-----------------------------
+
+FQDN = podname.headless-servicename.namespace.svc.cluster-domain.example
+
+vim ./headless-service.yml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql-h
+spec:
+  ports:
+    - port: 3306
+  selector:
+    app: mysql
+  clusterIP: None   ---> headless Service
+
+kubectl apply -f ./headless-service.yml
+
+vim ./pod-definition.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp-pod
+  labels:
+    app: mysql
+spec:
+  containers:
+  - name: mysql
+    image: mysql
+  subdomain: mysql-h
+  hostname: mysql-pod
+
+kubectl apply -f ./pod-definition.yml
+
+FQDN = myapp-pod.mysql-h.default.svc.cluster.local
+
+----------------
+
+vim ./deployment-definition.yml
+
+apiVersion: apps/v1 
+kind: Statefulset
+metadata:
+  name: mysql-deployment
+  labels:
+    app: mysql
+spec:
+  serviceName: mysql-h
+  replicas: 3
+  matchLabels:
+    app: mysql
+  template:
+    metadata:
+      name: myapp-pod
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql
+
+kubectl apply -f ./deployment-definition.yml
+
+--records in DNS
+
+mysql-0.mysql-h.default.svc.cluster.local
+mysql-1.mysql-h.default.svc.cluster.local
+mysql-2.mysql-h.default.svc.cluster.local
+
+-----------------------------------------------------
+---------------------senario headless service------
+
+vim ./headless-service.yml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: hs
+  namespace: dev
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: nginx-hs
+  clusterIP: None
+
+kubectl apply -f ./headless-service.yml
+
+vim ./statefulset-definition.yml
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: 
+  name: mysts
+  namespace: dev
+spec:
+  serviceName: hs
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx-hs
+  template:
+    metadata:
+      labels:
+        app: nginx-hs
+    spec:
+      containers:
+        - name: hs-pod
+          image: alpine:3.11
+          command:
+            - "sleep"
+            - "infinity"
+
+kubectl apply -f ./statefulset-definition.yml
+
+--- dig in container
+dig mysts-0.hs.dev.svc.cluster.local
+dig mysts-1.hs.dev.svc.cluster.local
+dig mysts-2.hs.dev.svc.cluster.local
+
+----------------------------------------------------------
+
+---------------storage in statefulsets-------------------
+
+static provisioning:
+
+vim ./pv-definition.yml
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-vol1
+spec:
+  accessModes:
+    - ReadWriteOnce     ----> 1
+  capacity:
+    storage: 500Mi      ----> 2
+  gcePersistentDisk:
+    pdName: pd-disk
+    fsType: ext4  
+
+kubectl apply -f ./pv-definition.yml
+
+vim ./pvc-definition.yml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-volume      ----> 3
+spec:
+  accessModes:
+    ReadWriteOnce        ----> 1
+  storageClassName: google-storage
+  resources:
+    requests:
+      storage: 500Mi     ----> 2
+
+kubectl apply -f ./pvc-definition.yml
+
+vim ./pod-definition.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mysql
+spec:
+  containers:
+  - image: mysql
+    name: mysql
+    volumeMounts:
+    - mountPath: /var/lib/mysql
+      name: data-volume
+  volumes:
+  - name: data-volume
+    persistentVolumeClaim:
+      claimName: data-volume   ----> 3
+
+kubectl apply -f ./pod-definition.yml
+
+------------Dynamic provisioning
+vim ./sc-definition.yml
+
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: google-storage    ---->  1
+provisioner: kunernetes.io/gce-pd
+
+
+kubectl apply -f ./sc-definition.yml
+
+vim ./pvc-definition.yml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-volume      ----> 2
+spec:
+  accessModes:
+    ReadWriteOnce        
+  storageClassName: google-storage  ----> 1
+  resources:
+    requests:
+      storage: 500Mi     
+
+kubectl apply -f ./pvc-definition.yml
+
+vim ./pod-definition.yml
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mysql
+spec:
+  containers:
+  - image: mysql
+    name: mysql
+    volumeMounts:
+    - mountPath: /var/lib/mysql
+      name: data-volume
+
+  volumes:
+  - name: data-volume
+    persistentVolumeClaim:
+      claimName: data-volume    ----> 2
+
+kubectl apply -f ./pod-definition.yml
+
+--------storage in statefulsets - shared storage
+vim ./statefulset.yml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql
+        volumeMounts:
+          - mountPath: /var/lib/mysql
+            name: data-volume
+      volumes:
+        - name: data-volume
+          persistentVolumeClaim:
+            claimName: data-Volume
+
+kubectl apply -f ./StatefulSet.yml
+
+-----storage in statefulsets - dedicated storage
+
+vim ./pvc-definition.yaml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+
+
+
+
+
+
+vim ./sc-definition.yml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: google-storage
+provisioner: kubernetes.io/gce-pd
+
+
+
+vim ./statefulset.yml
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  labels:
+    app: mysql
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql
+        volumeMounts:
+          - mountPath: /var/lib/mysql
+            name: data-volume
+volumeClaimTemplates:                 ---> pvc-definition
+- metadata:
+    name: data-volume
+  spec:
+    accessModes:
+      - ReadWriteOnce
+    storageClassName: google-storage
+    resources:
+      requests:
+        storage: 500Mi
+
+---------
+write controller:
+1) operator sdk
+2) metacontroller
+3) kudo
+--------
+
+empityDir configuration example: ---> anytime restart container delete all data in directory
+
+vim ./empty-def.yml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pd
+spec:
+  containers:
+  - image: k8s.gcr.io/test-webserver
+    name: test-container
+    volumeMounts:
+    - mountPath: /cache
+      name: cache-volume
+  volumes:
+  - name: cache-volume
+    empityDir: {}
+
+kubectl apply -f ./empty-def.yml
+-------------------------------------
+
+-----------------Demo statefulset
+
+vim ./headless-def.yml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: hs
+  namespace: ckatest
+spec:
+  ports:
+    - port: 80
+  selector:
+    app: nginx-hs
+  clusterIP: None
+
+kubectl apply -f ./headless-def.yml
+
+vim ./statefulset-def.yml
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysts
+  namespace: cka-test
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data-volume
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: default
+        resources:
+          requests:
+            storage: 10Mi
+  serviceName: hs
+  replicas: 3
+  selector:
+    matchLabels:
+      app: nginx-hs
+  template:
+    metadata:
+      labels:
+        app: nginx-hs
+    spec:
+      containers:
+        - name: hs-pod
+          image: alpine:3.11
+          command:
+            - "sleep"
+            - "infinity"
+          volumeMounts:
+            - mountPath: /var/lib/nginx
+              name: data-volume
+
+kubectl apply -f ./statefulset-def.yml  ---> create pvc and pv automatically
+
+https://github.com/kubernetes/cloud-provider-openstack
+
+--------------------------------------------NETWORKING----------------------------
+
+-----CLUSTER NETWORKING
+
+https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/install-kubeadm/#check-required-ports
+
+Control-plane node(s)
+Protocol	Direction	Port Range	Purpose	Used By
+TCP	Inbound	6443*	Kubernetes API server	All
+TCP	Inbound	2379-2380	etcd server client API	kube-apiserver, etcd
+TCP	Inbound	10250	kubelet API	Self, Control plane
+TCP	Inbound	10251	kube-scheduler	Self  --> 10259
+TCP	Inbound	10252	kube-controller-manager	Self  --> 10257
+Worker node(s)
+Protocol	Direction	Port Range	Purpose	Used By
+TCP	Inbound	10250	kubelet API	Self, Control plane
+TCP	Inbound	30000-32767	NodePort Services†	All
+
+----POD LAYER NETWORKING
+
+--CNI
+
+ps aux | grep kubelet
+ls /opt/cni/bin
+ls /etc/cni/net.d
+
+cat /etc/cni/net.d/10-bridge.conf
+
+-----------------------------SERVICES NETWORKING-------
+
+--How a service gets an IP
+
+kube-proxy --proxy-mode [userspace | iptables | ipvs ] 
+
+-----
+
+kubectl get pods -o wide
+
+kubectl get services
+
+ps aux | grep kube-api-server
+
+kube-api-server --service-cluster-ip-range ipNet (Default 10.0.0.0/24)
+
+kubectl get pods -o wide
+
+kubelet get service
+
+iptables -L -t nat | grep db-service
+
+cat /var/log/kube-proxy.log
+
+----------------DNS IN K8S-----(Session 10 , 180 m)
+
+iptables -L -t nat | grep -i kube-dns
+
+iptables -L -t nat | grep -i 10.96.0.10
+
+cd /etc/cni/net.d     ---> config for calico
+
+tailf /var/log/calico/cni/cni.log
+
+ps -ef | grep kube-proxy
+
+cd /var/lib/kubelet
+
+kubectl exec -i -t -n kube-system kube-proxy-2342 -c kube-proxy -- sh -c "clear ; (bash || ssh || sh)"
+
+Hostname.Namespace.Type.Root.IPAddress
+web-service.apps.svc.cluster.local
+10-244-2-5.apps.pod.cluster.local
+
+cat /etc/coredns/Corefile
+
+kubectl get configmap -n kube-system
+
+-----------------------------------------------------------------------
+------------------Session 11-------------------------------------------
+
+for manage secret and secret information use Git crept and selsecret hashicorpwalp.
+
+----------------------INGRESS-----------------------------------
+
+1) Deploy :  Nginx  Haproxy  traefik    ---> ingress controller (not deployed by default)
+2) Configure : +                        ---> ingress resources
+
+--
+ingress controller: 
+GCP HTTP(s) , Load Balancer(GCE) : Nginx , contour , Haproxy , traefik , istio
+--
+
+---example ingress controller
+1) Deployment
+2)Service
+3)ConfigMap
+4)Auth
+
+vim ./configmap.yml   ----> anything for config nginx
+
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: nginx-configuration
+
+kubectl apply -f ./configmap.yml
+
+vim ./Deployment-def.yaml
+
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: nginx-ingress-controller
+spec:
+  replicas:
+  selector:
+    matchLabels:
+      name: nginx-ingress
+  template:
+    metadata:
+      labels:
+        name: nginx-ingress
+    spec:
+      containers:
+        - name: nginx-ingress-controller
+          image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.21.0
+      args:
+        - /nginx-ingress-controller
+        - --configmap=$(POD_NAMESPACE)/nginx-configuration
+      env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+      ports: 
+        - name: http
+          containerPort: 80
+        - name: https
+          containerPort: 443
+
+kubectl apply -f ./Deployment-def.yaml
+-create service for nginx
+vim ./nginx-ingress.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-ingress
+spec:
+  type: NodePort
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 443
+    protocol: TCP
+    name: https
+  selector:
+    name: nginx-ingress
+
+kubectl apply -f ./nginx-ingress.yaml
+
+--(Role,Cluster,RoleBindings)
+vim ./serviceaccount.yaml
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nginx-ingress-serviceaccount
+
+kubectl apply -f ./serviceaccount.yaml
+
+---------
+
+------ingress resource
+
+-send request to port 80 on service name wear-service
+
+vim ./ingress-wear.yaml
+
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: ingress-wear
+spec:
+  backend:
+    serviceName: wear-service
+    servicePort: 80
+
+kubectl apply -f ./ingress-wear.yaml
+
+
+--
+1 Rule   www.my-online-store.com
+2 Paths  /wear   ,   /watch
+
+vim ./ingress-def.yaml
+
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: ingress-wear-watch
+spec:
+  rules:
+  - http:
+      paths:
+      - path: /wear
+        backend:
+          serviceName: wear-service
+          servicePort: 80
+      - path: /watch
+        backend:
+          serviceName: watch-service
+          servicePort: 80
+
+kubectl apply -f ./ingress-def.yaml
+
+kubectl describe ingress ingress-wear-watch
+
+--
+2 Rules     wear.my-online-store.com    watch.my-online-store.com
+1 Path each    
+
+vim ./ingress-wear-watch.yaml
+
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: ingress-wear-watch
+spec:
+  rules:
+  - host: wear.my-online-store.com
+    http:
+      paths:
+      - backend:
+          serviceName: wear-service
+          servicePort: 80
+  - host: watch.my-online-store.com
+    http:
+      paths:
+      - backend:
+          serviceName: watch-service
+          servicePort: 80
+
+kubectl apply -f ./ingress-wear-watch.yaml
+--
+https://docs.nginx.com/nginx-ingress-controller/configuration/ingress-resources/advanced-configuration-with-annotations/
+https://docs.nginx.com/nginx-ingress-controller/configuration/ingress-resources/basic-configuration/
+https://kubernetes.github.io/ingress-nginx/
+
+--------------HELM CHART------
+
+https://helm.sh/docs/intro/install/
+
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx    ---> add repo nginx ingress
+
+helm repo update
+
+helm install ingress-nginx ingress-nginx/ingress-nginx  ---> install ingress nginx
+
+OR
+
+kubectl create ns ingress-nginx   ---> create namespace and install ingress nginx on ns
+
+
+install with lens on Apps tab and charts
+
+when install show  config file
+
+default backend enable
+
+line 607 : default backend true(enabled: true)
+
+-------Demo - ingress
+
+-Deploy nginx ingress controller
+-Deploy some ingress resourses
+
+3 Rules:
+
+1) shop.com         2) support.shop.com       3) faq.shop.com
+/                       /                        
+/toy                    /contact
+/tools
+
+3 Paths                 2 Paths                  0 paths
+
+---
+
+kubectl create ns dev
+
+vim ./deployment-def.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop
+  namespace: dev
+  labels:
+    app: shop
+    site: shop.com
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop
+      site: shop.com
+  template:
+    metadata:
+      labels:
+        app: shop
+        site: shop.com
+    spec:
+      controllers:
+        - name: http-echo
+          image: registery.gitlab.x-ion.de/paas-public/mirror/http-echo:0.2.3
+          args:
+            - -text="shop.com"
+            - -listen=:80
+          resourses:
+            requests:
+              cpu: 5m
+              memeory: 5Mi
+            limits:
+              cpu: 10m
+              memeory: 40mi
+          ports:
+            - containerPort: 80
+
+kubectl apply -f ./deployment-def.yaml
+
+
+
+vim ./deployment-toy-def.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop.toy
+  namespace: dev
+  labels:
+    app: shop.toy
+    site: shop.com.toy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop.toy
+      site: shop.com.toy
+  template:
+    metadata:
+      labels:
+        app: shop.toy
+        site: shop.com.toy
+    spec:
+      controllers:
+        - name: http-echo
+          image: registery.gitlab.x-ion.de/paas-public/mirror/http-echo:0.2.3
+          args:
+            - -text="shop.com/toy"
+            - -listen=:80
+          resourses:
+            requests:
+              cpu: 5m
+              memeory: 5Mi
+            limits:
+              cpu: 10m
+              memeory: 40mi
+          ports:
+            - containerPort: 80
+
+kubectl apply -f ./deployment-toy-def.yaml
+
+
+vim ./deployment-tools-def.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shop.tools
+  namespace: dev
+  labels:
+    app: shop.tools
+    site: shop.com.tools
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shop.tools
+      site: shop.com.tools
+  template:
+    metadata:
+      labels:
+        app: shop.tools
+        site: shop.com.tools
+    spec:
+      controllers:
+        - name: http-echo
+          image: registery.gitlab.x-ion.de/paas-public/mirror/http-echo:0.2.3
+          args:
+            - -text="shop.com/tools"
+            - -listen=:80
+          resourses:
+            requests:
+              cpu: 5m
+              memeory: 5Mi
+            limits:
+              cpu: 10m
+              memeory: 40mi
+          ports:
+            - containerPort: 80
+
+kubectl apply -f ./deployment-tools-def.yaml
+
+
+vim ./deployment-support-def.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: support.shop
+  namespace: dev
+  labels:
+    app: support.shop
+    site: support.shop.com
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: support.shop
+      site: support.shop.com
+  template:
+    metadata:
+      labels:
+        app: shop.tools
+        site: support.shop.com
+    spec:
+      controllers:
+        - name: http-echo
+          image: registery.gitlab.x-ion.de/paas-public/mirror/http-echo:0.2.3
+          args:
+            - -text="support.shop.com"
+            - -listen=:80
+          resourses:
+            requests:
+              cpu: 5m
+              memeory: 5Mi
+            limits:
+              cpu: 10m
+              memeory: 40mi
+          ports:
+            - containerPort: 80
+
+kubectl apply -f ./deployment-support-def.yaml
+
+
+vim ./deployment-support-contact-def.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: support.shop.contact
+  namespace: dev
+  labels:
+    app: support.shop.contact
+    site: support.shop.com.contact
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: support.shop.contact
+      site: support.shop.com.contact
+  template:
+    metadata:
+      labels:
+        app: support.shop.contact
+        site: support.shop.com.contact
+    spec:
+      controllers:
+        - name: http-echo
+          image: registery.gitlab.x-ion.de/paas-public/mirror/http-echo:0.2.3
+          args:
+            - -text="support.shop.com/contact"
+            - -listen=:80
+          resourses:
+            requests:
+              cpu: 5m
+              memeory: 5Mi
+            limits:
+              cpu: 10m
+              memeory: 40mi
+          ports:
+            - containerPort: 80
+
+kubectl apply -f ./deployment-support-contact-def.yaml
+
+-
+
+vim ./ingress-def.yaml
+
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: ingress-shop
+  namespace: dev
+spec:
+  rules:
+    - host: shop.com
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: shop-com
+              servicePort: 80
+          - path: /toy
+            backend:
+              serviceName: shop-com-toy
+              servicePort: 80
+          - path: /tools
+            backend:
+              serviceName: shop-com-tools
+              servicePort: 80
+              
+    - host: support.shop.com
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: support-shop-com
+              servicePort: 80
+          - path: /contact
+            backend:
+              serviceName: support-shop-com-contact
+              servicePort: 80
+
+
+     - host: faq.shop.com
+       http:
+         paths:
+          
+           - backend:
+               serviceName: faq-shop-com
+               servicePort: 80
+
+
+kubectl apply -f ./ingress-def.yaml
+
+-in ingress pod exec
+
+curl http://shop.com
+curl http://shop.com/toy
+...
+
+curl http://support.shop.com
+curl http://support.shop.com/contact
+
+curl http://faq.shop.com
+
+curl http://career.shop.com   ---->use default backend (result 404 because not use url in manifest)
+
+kubectl -n dev describe ingress ingress-shop
+
+
+-----enable ssl on ingress(TLS)
+
+-in ingress ingress-shop on namespace dev edit
+
+
+vim ./ingress-def.yaml
+
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: ingress-shop
+  namespace: dev
+spec:
+  tls:                  ---> for ssl or TLS
+    - hosts:
+        - shop.com
+      secretName: "tls-secret-name-shop-com"
+    - hosts:
+        - support.shop.com
+        - faq.shop.com
+      secretName: "tls-secret-name" 
+    
+  rules:
+    - host: shop.com
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: shop-com
+              servicePort: 80
+          - path: /toy
+            backend:
+              serviceName: shop-com-toy
+              servicePort: 80
+          - path: /tools
+            backend:
+              serviceName: shop-com-tools
+              servicePort: 80
+              
+    - host: support.shop.com
+      http:
+        paths:
+          - path: /
+            backend:
+              serviceName: support-shop-com
+              servicePort: 80
+          - path: /contact
+            backend:
+              serviceName: support-shop-com-contact
+              servicePort: 80
+
+
+     - host: faq.shop.com
+       http:
+         paths:
+          
+           - backend:
+               serviceName: faq-shop-com
+               servicePort: 80
+
+
+kubectl apply -f ./ingress-def.yaml
+
+
+curl https://shop.com
+curl https://shop.com/toy
+...
+
+curl https://support.shop.com
+curl https://support.shop.com/contact
+
+curl https://faq.shop.com
+
+curl https://career.shop.com   ---->use default backend (result 404 because not use url in manifest)
+
+---
+
+
+--------------------------------------------------
+-----------------Troubleshooting--------------
+Check Dependent Service / Applications
+
+1) Application Failures
+2) Control Plane Failures
+3) Worker Node Failures
+
+--Application Failures
+
+Check Accessibility
+
+1) curl http://web-service-ip:node-port
+2) kubectl describe service web-service    ---> debug service
+see Endpoints exists  and for to number pods use Endpoints
+see Selector   name=webapp-mysql(Pod name)
+
+3) kubectl get pod
+READY 1/1   ---> right number is a number of container and left is ready container
+STATUS Running    ---> pending is not anynodes schedule
+RESTART           ----> see what many restart pod if restart is many App is fail
+
+4) kubectl describe pod web
+
+5) kubectl logs web   ---> log pod
+kubectl logs web -f
+kubectl logs web -f --previous   ---> see last logs
+
+6) and up process repeat for doen layer such as DB so on
+
+---Control Plane Failures(in kubeadm)
+
+https://kubernetes.io/docs/tasks/debug-application-cluster/debug-application/
+https://kubernetes.io/docs/tasks/debug-application-cluster/debug-cluster/
+
+1) kubectl get nodes
+2) kubectl get pods
+3) kubectl get pods -n kube-system
+
+4) service kube-apiserver status
+5) service kube-controller-manager status
+6) service kube-scheduler status
+
+7) service kubelet status
+8) service kube-proxy status
+
+9) kubectl logs kube-apiserver-master -n kube-system
+10) journalctl -u kube-apiserver
+
+---WORKER NODE Failures
+
+1) kubectl get nodes      ---> Notready kubelet for node is crash
+2) kubectl describe node worker-1
+
+3) top
+4) df -h
+
+
+-- Check Kubelet Status / Certificate
+
+openssl x509 -in /var/lib/kubelet/worker-1.crt -text
+
+1) see Issuer: CN= KUBERNETES-CA
+2) Not After : Time
+3) Subject: CN = system:node:worker-1 , O = system:nodes
+
+--------------------------------------------------------
+--------------Configure an HA Cluster---
+
+https://kubernetes.io/docs/setup/production-environment/tools/kubeadm/ha-topology/
+
+1) Stacked ETCD Topology
+2) External ETCD Topology
+
+-----SETUP HA K8S CLUSTER
+
+1) Create Load Balancer for API Server
+- external load balancer
+- keepalived and Haproxy
+- kube-vip
+
+---initialize the Control Plane
+
+
+
+sudo kubeadm init --config cluster-config.yaml --upload-certs    --->if use --upload-certs then any certificate automatically send another master node in cluster
+
+OR 
+
+
+vim ./cluster-config.yaml
+
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: $NODE_IP
+  bindPort: $LOCAL_LISTEN_PORT
+
+---
+
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+clusterName: $CLUSTER_NAME
+kubernetesVersion: $K8S_VERSION
+controlPlanEndpoint: $LOADBALANCER_DNS_NAME:$PORT
+networking:
+  podSubnet: $POD_CIDR
+
+-
+
+sudo kubeadm init \
+--kubernetes-version $K8S_VERSION \
+--apiserver-advertise-address $NODE_IP \
+--apiserver-bind-port $LOCAL_LISTEN_PORT \
+--pod-network-cidr $POD_CIDR \
+--control-plane-endpoint $LOADBALANCER_DNS_NAME:$PORT \
+--upload-certs
+
+------
+
+2) Apply a CNI
+
+kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+
+3) Join other Master Nodes
+
+kubeadm join $LOADBALANCER_DNS_NAME:$PORT \
+--control-plane \
+--apiserver-advertise-address $NODE_IP \
+--apiserver-bind-port $LOCAL_LISTEN_PORT \
+--apiserver-bind-port $PORT \
+--token $TOKEN \
+--discovery-token-ca-cert-hash sha256:$CA_CERT_HASH \
+--certificate-key $CERTIFICATE_KEY \
+--ignore-preflight-errors DirAvailable--etc-kubernetes-manifests
+
+4) Join worker Nodes
+
+kubeadm join $LOADBALANCER_DNS_NAME:$PORT \
+--token $TOKEN \
+--discovery-token-ca-cert-hash sha256:$CA_CERT_HASH \
+--certificate-key $CERTIFICATE_KEY
+
+------------------Demo
+
+$ HA-LB
+$ HA-kubevip
+
+https://github.com/ahmadbabaei/super-duper-carnival
+
+---
+-----------------------------Session 12----------------------
+-------------HA K8S------
+
+1) External Load Balancer
+2) keepalived nad Haproxy
+3) kube-vip
+
+
+---
+
+--kubeadm init file
+
+vim ./cluster.yaml
+
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.200.11
+---
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+clusterName: ha-kubernetes
+kubernetesVersion: v1.18.12
+controlPlaneEndpoint: ha-kubeapilb-1:6443  ---> for clustering , ip and port for loadbalancer
+networking:
+  podSubnet: 10.244.0.0/16
+
+--
+--on master1 ,external load balancer must provision
+
+kubeadm init --config cluster.yaml --upload-certs
+
+-----------
+--ssh kubemaster-1
+
+vim ./cluster.yaml
+
+
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.200.11
+---
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+clusterName: ha-kubernetes
+kubernetesVersion: v1.18.12
+controlPlaneEndpoint: ha-kubeapilb-1:6443  ---> for clustering , ip and port for loadbalancer
+networking:
+  podSubnet: 10.244.0.0/16
+
+
+kubeadm init --config cluster.yaml --upload-certs 
+
+vim /etc/haproxy/haproxy.cfg
+
+#-------------------
+defaults
+  mode         http
+  log          global
+  option       httplog
+  option       dontlognull
+  option   http-server-close
+  option   forwardor    except 127.0.0.0/8
+  option   redispatch
+  retries      1
+  timeout http-request  10s
+  timeout queue         20s
+  timeout connect       5s
+  timeout client        20s
+  timeout server        20s
+  timeout http-keep-alive 10s
+  timeout check         10s
+
+#--------------------------------
+# apiserver frontend which proxys to the masters
+#----------------------------------
+frontend apiserver
+    bind *:6443
+    mode tcp
+    option tcplog
+    default_backend apiserver
+
+#-----------------------------------------
+# round rabin balancing for apiserver
+#--------------------------------------
+backend apiserver 
+    option httpchk GET /healthz
+    http-check expect status 200
+    mode tcp
+    option  ssl-hello-chk
+    balance  roundrobin
+         server ha-kubemaster-1 ha-kubemaster-1:6443 check
+         server ha-kubemaster-2 ha-kubemaster-2:6443 check
+         server ha-kubemaster-3 ha-kubemaster-3:6443 check
+
+systemctl status haproxy
+
+
+-----
+
+kubeadm init --config cluster.yaml --upload-certs
+
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+kubectl get nodes
+
+sudo kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+
+--join master node
+
+kubeadm join ha-kubeapilb-1:6443 \ 
+--token ozlhby.pbi2v5kp0x8ix9cl \
+--discovery-token-ca-cert-hash sha256:7aff9979cace02a9f1e98d82253ef9a8c1594c80ea0860aba6ef628xdx7103fb \
+--control-plane --certificate-key 3606aa528cd7d730efafcf535625577d6fx77x7cb6f90e5a8517a807065672d 
+
+---join worker node
+
+kubeadm join ha-kubeapilb-1:6443 --token mlkmlvenvelvl \
+--discovery-token-ca-cert-hash sha256:8978567876578..
+
+-----------------------------
+
+kubectl get node
+
+
+----join master node 2
+
+kubeadm join ha-kubeapilb-1:6443 \ 
+--token ozlhby.pbi2v5kp0x8ix9cl \
+--discovery-token-ca-cert-hash sha256:7aff9979cace02a9f1e98d82253ef9a8c1594c80ea0860aba6ef628xdx7103fb \
+--control-plane --certificate-key 3606aa528cd7d730efafcf535625577d6fx77x7cb6f90e5a8517a807065672d --apiserver-advertise-address 192.168.200.12     ---> ip address api kube woker 2
+
+-----------------------------
+----ssh master1
+
+kubectl get node
+
+cd /etc/kubernetes
+cp admin.conf .         ----> for connect to cluster
+
+---
+
+1) argoCD
+2) FluxCD
+3) JenkinsX
+
+-----------
+
+1) argoCD
+https://argoproj.github.io/argo-cd/
+--non HA:
+
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+-----------------------------kubevip----
+
+--kubevip use 10000 port
+
+--kubevip in master nodes
+
+vi /etc/kube-vip/config.yaml
+
+localPeer:
+  id: ha-kubemaster-1
+  address: ha-kubemaster-1
+  port: 10000
+remotePeers:
+  - id: ha-kubemaster-2
+    address: ha-kubemaster-2
+    port: 10000
+  - id: ha-kubemaster-3
+    address: ha-kubemaster-3
+    port: 10000
+vip: 192.168.200.200
+gratuitousARP: true
+singleNode: false
+startAsLeader: true
+interface: enp0s8
+LoadBalancers:
+  - name: API Server Load Balancer
+    type: tcp
+    port: 6443
+    bindToVip: false
+    backends:
+      - port: 8443
+        address: ha-kubemaster-1
+      - port: 8443
+        address: ha-kubemaster-2
+      - port: 8443
+        address: ha-kubemaster-3
+
+
+-----------------
+
+---init kubeadm with kube-vip
+
+vim ./cluster.config
+
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: 192.168.200.11
+  bindPort: 8443
+
+---
+apiVersion: kubeadm.k8s.io/v1beta2
+kind: ClusterConfiguration
+clusterName: ha-kubernetes
+kubernetesVersion: v1.18.12
+controlPlaneEndpoint: kubeapi-vip:6443    ----> vip in kube-vip
+networking:
+  podSubnet: 10.244.0.0/16
+
+
+
+kubeadm init --config cluster.yaml --upload-certs
+
+------------
+
+kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yaml
+
+kubeadm join ha-kubeapilb-1:6443 \ 
+--token ozlhby.pbi2v5kp0x8ix9cl \
+--discovery-token-ca-cert-hash sha256:7aff9979cace02a9f1e98d82253ef9a8c1594c80ea0860aba6ef628xdx7103fb \
+--control-plane --certificate-key 3606aa528cd7d730efafcf535625577d6fx77x7cb6f90e5a8517a807065672d --apiserver-advertise-address 192.168.200.12  --ignore-preflight-errors=DirAvailable--etc-kubernetes-manifests   ---> ip address api kube woker 2
+
+---master2
+
+kubeadm join ha-kubeapilb-1:6443 \ 
+--token ozlhby.pbi2v5kp0x8ix9cl \
+--discovery-token-ca-cert-hash sha256:7aff9979cace02a9f1e98d82253ef9a8c1594c80ea0860aba6ef628xdx7103fb \
+--control-plane --certificate-key 3606aa528cd7d730efafcf535625577d6fx77x7cb6f90e5a8517a807065672d --apiserver-advertise-address 192.168.200.13  --ignore-preflight-errors=DirAvailable--etc-kubernetes-manifests   ---> ip address api kube woker 2
+
+------
+
+kubectl log kube-vip-ha-kubemaster-1 -n kube-system
+
+-----------------cert manager-----------------------
+
+--documentaion for cert-manager and install cert-manager on k8s
+
+https://cert-manager.io/docs/
+
+kubectl get nodes
+
+kubectl create ns cert-manager
+
+## Add the Jetstack Helm repository
+helm repo add jetstack https://charts.jetstack.io
+
+helm repo update
+
+## Install the cert-manager helm chart
+helm install \
+cert-manager jetstack/cert-manager \
+--namespace cert-manager \
+--create-namespace \
+--version v1.3.1 \
+--set installCRDs=true      -----> (custom resource definition)
+
+
+kubectl api-resources | grep -i certificate
+
+kubectl get crd   ---->   (custom resource definition)
+
+kubectl delete crd certificate.cert-manager.io
+
+kubectl delete crd certificaterequests.cert-manager.io
+
+kubectl api-resources | grep -i certificate
+
+kubectl get crd | grep -i cert-manager
+
+kubectl explain issure.spec
+
+kubectl create ns cert-manager-test
+
+kubectl explain issure.
+
+vim ./issure.yaml
+
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsign-issuer
+  namespace: cert-manager-test
+spec:
+  selfSigned: {}
+
+kubectl -n cert-manager-test get issuer
+
+kubectl -n cert-manager-test delete issuer selfsigne-issuer
+
+--- issuer is namespace scope but one issure for all cluster that share all namespace
+
+kubectl explain clusterissuer.spec
+
+vim ./issure.yaml
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsign-cluster-issuer
+  namespace: cert-manager-test
+spec:
+  selfSigned: {}
+
+--
+https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/
+vim ingress.yaml
+
+...
+.
+.
+annotations:
+  cert-manager.io/issuer: selfSigned   OR  cert-manager.io/cluster-issuer: selfsigned-cluster-Issuer
+.
+.
+apiVersion: networking.k8s.io/v1beta1
+.
+.
+spec:
+  tls:
+    - hosts:
+        - "shop.com"
+        - "*.shop.com"
+      secretName: shop-cert
+.
+.
+
+--- https://cert-manager.io/docs/usage/ingress/
+
+-------Demo 
+
+kubectl create ns dev
+
+kubectl -n dev apply -f ingress.yaml
+
+--https://letsencrypt.org/docs/staging-environment/
+
+--https://docs.cert-manager.io/en/release-0.11/tasks/issuers/setup-acme/http01/index.html
+----cluster issuer letsencript 
+
+vim ./letsencript-stag.yaml
+
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+  namespace: cert-manager-test
+spec:
+  acme:
+    email: test@mail.com
+    privateKeySecretRef: 
+      name: secret-name
+    server: 'https://acme-staging-v02.api.letsencript.org/directory'
+    solvers:
+      - http01:
+          ingres:
+            class: x-ion
+
+
+kubectl apply -f ./letsencript-stag.yaml
+
+kubectl get clusterissuer
+
+kubectl explain clusterissuer.spec.acme
+
+------HPA
+
+--metric server needed for read cpu and RAM
+
+kubectl top node
+kubectl top pod -n kube-system
+
+------DEMO HPA
+
+vim ./deploy-man.yml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: php-apache
+  namespace: dev
+spec:
+  selector:
+    matchLabels:
+      run: php-apache
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        run: php-apache
+    spec:
+      containers:
+      - name: php-apache
+        image: k8s.gcr.io/hpa-example
+        ports:
+        - containerPort: 80
+        resources:
+          limits:
+            cpu: 500m
+          requests:
+            cpu: 200m
+
+----
+apiVersion: v1
+kind: Service
+metadata:
+  name: php-apache
+  namespace: dev
+  labels:
+    run: php-apache
+spec:
+  ports:
+  - port: 80
+  selector:
+    run: php-apache
+---
+kind: HorizantalPodAutoscaler
+apiVersion: autoscaling/v2beta2
+metadata:
+  name: php-apache
+  namespace: dev
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: php-apache
+
+kubectl -n dev run debugger --image alpine:3.11 -- sleep infinity
+
+-- run pod debugger
+
+while sleep 0.01; do wget -q -O- http://php-apache; done
+
+watch kubectl -n dev top
+
+--- another HPA DEMO
+kind: HorizontalPodAutoscaler
+apiVersion: autoscaling/v2beta2
+metadata:
+  name: php-apache
+  namespace: dev
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: php-apache
+    apiVersion: apps/v1
+  minReplicas: 1
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      policies:
+        - type: Pods
+          value: 5
+          periodSeconds: 30
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+      selectPolicy: Max
+      stabilizationWindowSeconds: 5
+    scaleDown:
+      policies:
+        - type: Pods
+          value: 4
+          periodSeconds: 10
+        - type: Percent
+          value: 10
+          periodSeconds: 10
+      selectPolicy: Min
+      stabilizationWindowSeconds: 5
+------------------------VPA
+https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler#install-command
+https://github.com/kubernetes/autoscaler/tree/master/vertical-pod-autoscaler
+
+--
+vim ./vpa-def.yml
+
+apiVersion: "autoscaling.k8s.io/v1"
+kind: VerticalPodAutoscaler
+metadata:
+  name: php-apache
+  namespace: dev
+spec:
+  targetRef:
+    apiVersion: "apps/v1"
+    kind: Deployment
+    name: php-apache
+  updatePolicy:
+    updateMode: "off"
+
+---------
+vim ./vpa-def.yml
+
+apiVersion: "autoscaling.k8s.io/v1"
+kind: VerticalPodAutoscaler
+metadata:
+  name: php-apache
+  namespace: dev
+spec:
+  targetRef:
+    apiVersion: "apps/v1"
+    kind: Deployment
+    name: php-apache
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: '*'
+        mode: "Auto"
+        controlledValues: "RequestsAndLimits"
+        minAllowed:
+          cpu: 10m
+          memory: 5Mi
+        maxAllowed:
+          cpu: 200m
+          memory: 500Mi
+        controlledResources: ["cpu", "memory"]
+
+kubectl get vpa -n dev
+
+kubectl describe vpa -n kube-system
+-----------------------END--------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
+
+
+
+
+
+
+
+
+
+
+
+
